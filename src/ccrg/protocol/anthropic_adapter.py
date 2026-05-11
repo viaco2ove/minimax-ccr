@@ -33,6 +33,11 @@ class AnthropicAdapter(ProtocolAdapter):
         # 3. 清理 system-reminder
         result = _strip_system_reminders(result)
 
+        # 4. 如果 provider 不支持 thinking，剥离 thinking 字段
+        capabilities = provider_config.get("capabilities", {})
+        if not capabilities.get("thinking", False) and "thinking" in result:
+            del result["thinking"]
+
         return result
 
     def get_target_url(self, provider_config: dict, model: str | None = None) -> str:

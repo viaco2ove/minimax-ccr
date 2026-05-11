@@ -88,6 +88,7 @@ src/ccrg/
 ## Claude Code Router Gateway (CCRG)
 [overview.md](md/claude-code-router-gateway/overview.md)
 http://127.0.0.1:3428/stats
+http://127.0.0.1:3428/dashboard 
 
 
 
