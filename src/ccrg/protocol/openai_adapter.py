@@ -25,35 +25,41 @@ class OpenAIAdapter(ProtocolAdapter):
         model = request.get("model", provider_config["models"][0] if provider_config["models"] else "")
         result["model"] = model
 
+        # deepseek-reasoner 不支持 tools、temperature 等参数
+        is_reasoner = "reasoner" in model
+
         # messages
-        result["messages"] = self._convert_messages(request)
+        result["messages"] = self._convert_messages(request, is_reasoner)
 
         # stream
         result["stream"] = request.get("stream", False)
 
         # tools
-        tools = self._convert_tools(request.get("tools", []))
-        if tools:
-            result["tools"] = tools
+        if not is_reasoner:
+            tools = self._convert_tools(request.get("tools", []))
+            if tools:
+                result["tools"] = tools
 
-        # tool_choice
-        if "tool_choice" in request:
-            result["tool_choice"] = self._convert_tool_choice(request["tool_choice"])
+            # tool_choice
+            if "tool_choice" in request:
+                result["tool_choice"] = self._convert_tool_choice(request["tool_choice"])
 
         # 参数映射
         if "max_tokens" in request:
             result["max_tokens"] = request["max_tokens"]
-        if "temperature" in request:
+        if not is_reasoner and "temperature" in request:
             result["temperature"] = request["temperature"]
         if "stop_sequences" in request:
             result["stop"] = request["stop_sequences"]
-        if "top_p" in request:
+        if not is_reasoner and "top_p" in request:
             result["top_p"] = request["top_p"]
 
-        # thinking → reasoning_effort
+        # thinking → reasoning_effort (仅对支持该参数的模型发送)
         thinking = request.get("thinking")
         if thinking:
-            result["reasoning_effort"] = "high"
+            # deepseek-reasoner 自动推理，不需要 reasoning_effort
+            if not is_reasoner:
+                result["reasoning_effort"] = "high"
 
         # 合并 default_params
         default_params = provider_config.get("default_params", {})
@@ -70,7 +76,7 @@ class OpenAIAdapter(ProtocolAdapter):
             base += "/v1/chat/completions"
         return base
 
-    def _convert_messages(self, request: dict) -> list[dict]:
+    def _convert_messages(self, request: dict, is_reasoner: bool = False) -> list[dict]:
         """转换 messages 数组"""
         messages = []
         system = extract_system(request)
@@ -83,14 +89,17 @@ class OpenAIAdapter(ProtocolAdapter):
             content = msg.get("content", "")
 
             if role == "user":
-                converted = self._convert_user_message(msg)
+                converted = self._convert_user_message(msg, is_reasoner)
                 if isinstance(converted, list):
                     messages.extend(converted)
                 else:
                     messages.append(converted)
             elif role == "assistant":
-                messages.append(self._convert_assistant_message(msg))
+                messages.append(self._convert_assistant_message(msg, is_reasoner))
             elif role == "tool":
+                if is_reasoner:
+                    # deepseek-reasoner 不支持 tool role，跳过
+                    continue
                 # tool 结果直接追加
                 tool_id = msg.get("tool_call_id", "")
                 tool_content = content
@@ -106,7 +115,7 @@ class OpenAIAdapter(ProtocolAdapter):
 
         return messages
 
-    def _convert_user_message(self, msg: dict) -> list[dict] | dict:
+    def _convert_user_message(self, msg: dict, is_reasoner: bool = False) -> list[dict] | dict:
         """转换 user message"""
         content = msg.get("content", "")
 
@@ -140,6 +149,15 @@ class OpenAIAdapter(ProtocolAdapter):
                         })
 
                 elif block_type == "tool_result":
+                    if is_reasoner:
+                        # deepseek-reasoner 不支持 tool，将结果作为文本拼入
+                        result_content = block.get("content", "")
+                        if isinstance(result_content, list):
+                            result_content = " ".join(
+                                b.get("text", "") for b in result_content if isinstance(b, dict)
+                            )
+                        parts.append({"type": "text", "text": f"[Tool Result] {result_content}"})
+                        continue
                     # tool_result 需要拆成独立的 tool message
                     tool_id = block.get("tool_use_id", "")
                     result_content = block.get("content", "")
@@ -157,7 +175,7 @@ class OpenAIAdapter(ProtocolAdapter):
 
         return {"role": "user", "content": str(content) if content else ""}
 
-    def _convert_assistant_message(self, msg: dict) -> dict:
+    def _convert_assistant_message(self, msg: dict, is_reasoner: bool = False) -> dict:
         """转换 assistant message"""
         content = msg.get("content", "")
         result = {"role": "assistant"}
@@ -180,19 +198,23 @@ class OpenAIAdapter(ProtocolAdapter):
                     text_parts.append(block.get("text", ""))
 
                 elif block_type == "tool_use":
-                    tool_calls.append({
-                        "id": block.get("id", f"call_{uuid.uuid4().hex[:8]}"),
-                        "type": "function",
-                        "function": {
-                            "name": block.get("name", ""),
-                            "arguments": json.dumps(block.get("input", {}), ensure_ascii=False)
-                        }
-                    })
+                    if is_reasoner:
+                        # deepseek-reasoner 不支持 tool_calls，将调用信息作为文本拼入
+                        text_parts.append(f"[Tool Call: {block.get('name', '')}({json.dumps(block.get('input', {}), ensure_ascii=False)})]")
+                    else:
+                        tool_calls.append({
+                            "id": block.get("id", f"call_{uuid.uuid4().hex[:8]}"),
+                            "type": "function",
+                            "function": {
+                                "name": block.get("name", ""),
+                                "arguments": json.dumps(block.get("input", {}), ensure_ascii=False)
+                            }
+                        })
 
                 # thinking 块暂不转换
 
             result["content"] = "\n".join(text_parts) if text_parts else None
-            if tool_calls:
+            if not is_reasoner and tool_calls:
                 result["tool_calls"] = tool_calls
 
         return result

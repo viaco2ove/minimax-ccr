@@ -10,14 +10,14 @@ from typing import AsyncGenerator
 
 import httpx
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from .config import load_config
 from .protocol import AnthropicAdapter, OpenAIAdapter, ProtocolAdapter
 from .classifier.scenario import ScenarioClassifier
 from .classifier.tool_type import ToolTypeClassifier
 from .classifier.keyword import KeywordClassifier
-from .provider import ProviderRegistry
+from .provider.registry import ProviderRegistry
 from .router import RoutingEngine
 from .types import GatewayConfig, ProviderConfig, RequestTags
 from .usage_stats import get_usage_stats
@@ -50,6 +50,116 @@ _usage_stats = None
 _classifier_scenario = ScenarioClassifier()
 _classifier_tool = ToolTypeClassifier()
 
+# ── Dashboard 页面 ──────────────────────────────────────────────
+
+_DASHBOARD_HTML = r"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CCRG Dashboard</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh}
+  .header{background:linear-gradient(135deg,#1e293b,#0f172a);padding:24px 32px;border-bottom:1px solid #334155;display:flex;align-items:center;justify-content:space-between}
+  .header h1{font-size:22px;font-weight:600;color:#f1f5f9}
+  .header .badge{background:#3b82f6;color:#fff;padding:4px 12px;border-radius:12px;font-size:12px}
+  .container{max-width:1200px;margin:0 auto;padding:24px}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-bottom:24px}
+  .card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:20px}
+  .card .label{font-size:13px;color:#94a3b8;margin-bottom:4px}
+  .card .value{font-size:28px;font-weight:700;color:#f1f5f9}
+  .card .sub{font-size:12px;color:#64748b;margin-top:4px}
+  .section{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:20px;margin-bottom:24px}
+  .section h2{font-size:16px;font-weight:600;margin-bottom:16px;color:#e2e8f0}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;padding:10px 12px;color:#94a3b8;font-weight:500;border-bottom:1px solid #334155}
+  td{padding:10px 12px;border-bottom:1px solid #1e293b}
+  tr:hover td{background:#0f172a}
+  .tag{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:500}
+  .tag-green{background:#064e3b;color:#6ee7b7}
+  .tag-red{background:#450a0a;color:#fca5a5}
+  .tag-blue{background:#1e3a5f;color:#93c5fd}
+  .bar{height:8px;border-radius:4px;background:#334155;overflow:hidden;margin-top:6px}
+  .bar-fill{height:100%;border-radius:4px;transition:width .6s ease}
+  .refresh-btn{background:#3b82f6;color:#fff;border:none;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px}
+  .refresh-btn:hover{background:#2563eb}
+  .empty{text-align:center;color:#64748b;padding:40px;font-size:14px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .loading{animation:spin 1s linear infinite;display:inline-block}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>CCRG Dashboard</h1>
+  <div style="display:flex;align-items:center;gap:12px">
+    <span class="badge" id="auto-badge">Auto 10s</span>
+    <button class="refresh-btn" onclick="loadStats()">Refresh</button>
+  </div>
+</div>
+<div class="container">
+  <div class="cards" id="summary-cards"></div>
+  <div class="section">
+    <h2>Today's Usage by Provider</h2>
+    <div id="today-table"></div>
+  </div>
+  <div class="section">
+    <h2>All-time Summary</h2>
+    <div id="summary-table"></div>
+  </div>
+</div>
+<script>
+function fmt(n){return n==null?'-':n.toLocaleString()}
+function fmtTokens(n){if(n==null)return'-';if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return n.toString()}
+function successTag(s,f){if(s+f===0)return'<span class="tag tag-blue">no data</span>';const r=s/(s+f);return r>=0.9?'<span class="tag tag-green">'+s+'/'+(s+f)+' ('+(r*100).toFixed(0)+'%)</span>':'<span class="tag tag-red">'+s+'/'+(s+f)+' ('+(r*100).toFixed(0)+'%)</span>'}
+function barHtml(pct,color){return'<div class="bar"><div class="bar-fill" style="width:'+Math.min(pct,100)+'%;background:'+color+'"></div></div>'}
+const COLORS=['#3b82f6','#8b5cf6','#ec4899','#f59e0b','#10b981','#ef4444'];
+function renderSummaryCards(summary){
+  const el=document.getElementById('summary-cards');
+  const t=summary.total_tokens||0,r=summary.total_requests||0,pCount=Object.keys(summary.providers||{}).length;
+  el.innerHTML=`
+    <div class="card"><div class="label">Total Requests</div><div class="value">${fmt(r)}</div></div>
+    <div class="card"><div class="label">Total Tokens</div><div class="value">${fmtTokens(t)}</div><div class="sub">${fmt(t)} tokens</div></div>
+    <div class="card"><div class="label">Providers</div><div class="value">${pCount}</div></div>`;
+}
+function renderTodayTable(today){
+  const el=document.getElementById('today-table');
+  const entries=Object.entries(today||{});
+  if(!entries.length){el.innerHTML='<div class="empty">No data for today</div>';return}
+  let maxTokens=0;entries.forEach(([_,d])=>{if(d.total_tokens>maxTokens)maxTokens=d.total_tokens});
+  let html='<table><tr><th>Provider</th><th>Models</th><th>Requests</th><th>Success</th><th>Input</th><th>Output</th><th>Total Tokens</th><th>Avg Latency</th></tr>';
+  entries.forEach(([name,d],i)=>{
+    const c=COLORS[i%COLORS.length];
+    html+=`<tr><td style="font-weight:600;color:${c}">${name}</td><td style="font-size:11px;color:#94a3b8">${(d.models||[]).join(', ')}</td><td>${fmt(d.request_count)}</td><td>${successTag(d.success_count,d.fail_count)}</td><td>${fmtTokens(d.input_tokens)}</td><td>${fmtTokens(d.output_tokens)}</td><td>${fmtTokens(d.total_tokens)}${barHtml(maxTokens?d.total_tokens/maxTokens*100:0,c)}</td><td>${d.avg_latency_ms?d.avg_latency_ms.toFixed(0)+'ms':'-'}</td></tr>`;
+  });
+  html+='</table>';el.innerHTML=html;
+}
+function renderSummaryTable(summary){
+  const el=document.getElementById('summary-table');
+  const entries=Object.entries(summary.providers||{});
+  if(!entries.length){el.innerHTML='<div class="empty">No historical data</div>';return}
+  let maxTokens=0;entries.forEach(([_,d])=>{if(d.total_tokens>maxTokens)maxTokens=d.total_tokens});
+  let html='<table><tr><th>Provider</th><th>Total Requests</th><th>Total Tokens</th></tr>';
+  entries.forEach(([name,d],i)=>{
+    const c=COLORS[i%COLORS.length];
+    html+=`<tr><td style="font-weight:600;color:${c}">${name}</td><td>${fmt(d.total_requests)}</td><td>${fmtTokens(d.total_tokens)}${barHtml(maxTokens?d.total_tokens/maxTokens*100:0,c)}</td></tr>`;
+  });
+  html+='</table>';el.innerHTML=html;
+}
+async function loadStats(){
+  try{
+    const resp=await fetch('/stats');const data=await resp.json();
+    renderSummaryCards(data.summary||{});
+    renderTodayTable(data.today||{});
+    renderSummaryTable(data.summary||{});
+  }catch(e){console.error('Failed to load stats:',e)}
+}
+loadStats();
+setInterval(loadStats,10000);
+</script>
+</body>
+</html>"""
+
 
 def init_app(config_path: str | None = None) -> FastAPI:
     """初始化 FastAPI 应用"""
@@ -80,6 +190,11 @@ def init_app(config_path: str | None = None) -> FastAPI:
             "today": today_stats,
             "summary": summary,
         }
+
+    @app.get("/dashboard")
+    async def dashboard():
+        """Token 使用可视化面板"""
+        return HTMLResponse(content=_DASHBOARD_HTML)
 
     @app.get("/")
     async def root():
@@ -128,14 +243,13 @@ async def _handle_request(request: Request) -> Response:
         )
         return error_resp
 
-    # 4. 选择 adapter
+    # 4. 选择 adapter（仅用于日志和初始判断）
     adapter: ProtocolAdapter
     if provider_config.protocol == "codeplan_anthropic":
         adapter = AnthropicAdapter()
     elif provider_config.protocol == "chat_openai":
         adapter = OpenAIAdapter()
     elif provider_config.protocol == "mmx":
-        # mmx: 走本地 mmx_provider.py，也用 Anthropic 格式
         adapter = AnthropicAdapter()
     else:
         error_resp = JSONResponse(
@@ -144,20 +258,7 @@ async def _handle_request(request: Request) -> Response:
         )
         return error_resp
 
-    # 5. 转换请求
-    transformed_request = adapter.transform_request(body, _provider_config_to_dict(provider_config))
-
-    # 6. 获取目标 URL
-    target_url = adapter.get_target_url(_provider_config_to_dict(provider_config), route_result.model)
-    if not target_url.startswith("http"):
-        target_url = f"http://{target_url}"
-
-    # 7. 发送请求（带 fallback）
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {provider_config.api_key}",
-    }
-
+    # 5. 发送请求（带 fallback）
     timeout = _config.server.get("timeout_ms", 600000) / 1000
 
     # 先尝试主 provider，然后是 fallback
@@ -173,9 +274,11 @@ async def _handle_request(request: Request) -> Response:
 
             # 获取 provider 对应的 adapter
             prov_adapter = _get_adapter_for_provider(prov_name)
-            prov_protocol = prov_config.protocol
 
-            # 获取 provider 对应的 target_url 和 headers
+            # 为每个 provider 重新转换原始请求（不同协议需要不同格式）
+            req_for_provider = prov_adapter.transform_request(body, _provider_config_to_dict(prov_config))
+            req_for_provider["model"] = model
+
             prov_target_url = prov_adapter.get_target_url(_provider_config_to_dict(prov_config), model)
             if not prov_target_url.startswith("http"):
                 prov_target_url = f"http://{prov_target_url}"
@@ -185,17 +288,14 @@ async def _handle_request(request: Request) -> Response:
                 "Authorization": f"Bearer {prov_config.api_key}",
             }
 
-            # 更新请求中的 model
-            req_for_provider = dict(transformed_request)
-            req_for_provider["model"] = model
-
             logger.info(f"[{request_id}] Calling {prov_name} at {prov_target_url}")
 
             if body.get("stream"):
-                # 流式请求 - client 生命周期由 StreamingResponse 管理
-                return await _handle_streaming(
-                    request_id, prov_target_url, prov_headers, req_for_provider,
-                    prov_adapter, prov_protocol, timeout
+                # 流式请求 - 使用独立函数处理，支持 fallback 重试
+                return await _handle_streaming_with_fallback(
+                    request_id, body, providers_to_try,
+                    _provider_config_to_dict, _registry, _get_adapter_for_provider,
+                    _usage_stats, route_result.matched_rule, start_time, timeout
                 )
             else:
                 # 非流式请求
@@ -228,7 +328,12 @@ async def _handle_request(request: Request) -> Response:
                     return JSONResponse(content=transformed_resp)
 
         except httpx.HTTPStatusError as e:
-            logger.warning(f"[{request_id}] {prov_name} returned {e.response.status_code}")
+            error_body = ""
+            try:
+                error_body = e.response.text[:500]
+            except Exception:
+                pass
+            logger.warning(f"[{request_id}] {prov_name} returned {e.response.status_code}: {error_body}")
             if _usage_stats:
                 _usage_stats.record(
                     provider=prov_name, model=model,
@@ -260,6 +365,123 @@ async def _handle_request(request: Request) -> Response:
     )
 
 
+async def _handle_streaming_with_fallback(
+    request_id: str,
+    original_body: dict,
+    providers_to_try: list[tuple[str, str]],
+    provider_config_to_dict,  # 函数引用
+    registry: ProviderRegistry,
+    get_adapter: callable,
+    usage_stats,
+    matched_rule: str,
+    start_time: float,
+    timeout: float
+) -> StreamingResponse:
+    """处理流式请求(带 fallback 支持)"""
+    from .protocol.openai_sse import OpenAISSEConverter
+
+    provider_index = [0]  # 用列表包装以便在闭包中修改
+
+    async def stream_generator() -> AsyncGenerator[bytes, None]:
+        last_error = None
+
+        while provider_index[0] < len(providers_to_try):
+            prov_name, model = providers_to_try[provider_index[0]]
+            provider_index[0] += 1
+
+            prov_config = registry.get(prov_name)
+            if not prov_config:
+                continue
+
+            prov_adapter = get_adapter(prov_name)
+
+            # 为每个 provider 重新转换原始请求（不同协议需要不同格式）
+            req_for_provider = prov_adapter.transform_request(original_body, provider_config_to_dict(prov_config))
+            req_for_provider["model"] = model
+
+            target_url = prov_adapter.get_target_url(provider_config_to_dict(prov_config), model)
+            if not target_url.startswith("http"):
+                target_url = f"http://{target_url}"
+
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {prov_config.api_key}",
+            }
+
+            logger.info(f"[{request_id}] Calling {prov_name} at {target_url}")
+
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    async with client.stream("POST", target_url, json=req_for_provider, headers=headers) as response:
+                        response.raise_for_status()
+
+                        converter = None
+                        if prov_config.protocol == "chat_openai":
+                            converter = OpenAISSEConverter(model)
+
+                        first_chunk_sent = False
+                        async for line in response.aiter_lines():
+                            line = line.strip()
+                            if not line:
+                                continue
+
+                            if not line.startswith("data: "):
+                                yield f"{line}\n".encode("utf-8")
+                                first_chunk_sent = True
+                                continue
+
+                            if converter:
+                                raw_chunk = line.encode("utf-8")
+                                events = converter.convert_chunk(raw_chunk)
+                                for event in events:
+                                    yield event
+                                    first_chunk_sent = True
+                            else:
+                                yield f"{line}\n".encode("utf-8")
+                                first_chunk_sent = True
+
+                        # 流成功完成（正常结束或客户端断开）
+                        if first_chunk_sent:
+                            latency_ms = (time.time() - start_time) * 1000
+                            logger.info(f"[{request_id}] Streaming completed from {prov_name}, latency={latency_ms/1000:.3f}s")
+                            if usage_stats:
+                                usage_stats.record(
+                                    provider=prov_name, model=model,
+                                    input_tokens=0, output_tokens=0,
+                                    latency_ms=latency_ms, success=True,
+                                    route_rule=matched_rule,
+                                )
+                            return  # 成功完成，退出
+
+            except httpx.HTTPStatusError as e:
+                logger.warning(f"[{request_id}] {prov_name} returned {e.response.status_code}")
+                last_error = e
+                continue
+            except Exception as e:
+                # 可能是 "client has been closed" 或其他错误
+                logger.warning(f"[{request_id}] {prov_name} streaming error: {e}")
+                last_error = e
+                continue
+
+        # 所有 provider 都失败
+        latency = time.time() - start_time
+        logger.error(f"[{request_id}] All streaming providers failed after {latency:.3f}s")
+        error_msg = str(last_error) if last_error else "All providers failed"
+        error_json = json.dumps({"error": {"type": "upstream_error", "message": error_msg}})
+        yield f"data: {error_json}\n\n".encode("utf-8")
+
+        if usage_stats:
+            usage_stats.record(
+                provider=providers_to_try[0][0] if providers_to_try else "unknown",
+                model=providers_to_try[0][1] if providers_to_try else "unknown",
+                input_tokens=0, output_tokens=0,
+                latency_ms=latency * 1000, success=False,
+                route_rule=matched_rule,
+            )
+
+    return StreamingResponse(stream_generator(), media_type="text/event-stream")
+
+
 async def _handle_streaming(
     request_id: str,
     url: str,
@@ -269,18 +491,16 @@ async def _handle_streaming(
     provider_protocol: str = "codeplan_anthropic",
     timeout: float = 600.0
 ) -> StreamingResponse:
-    """处理流式请求"""
+    """处理单个流式请求(保留向后兼容)"""
 
     from .protocol.openai_sse import OpenAISSEConverter
 
     async def stream_generator() -> AsyncGenerator[bytes, None]:
-        # 在生成器内部创建 client，确保生命周期覆盖整个流式传输
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            try:
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 async with client.stream("POST", url, json=request, headers=headers) as response:
                     response.raise_for_status()
 
-                    # 如果是 OpenAI provider，需要转换 SSE
                     converter = None
                     if provider_protocol == "chat_openai":
                         model = request.get("model", "")
@@ -291,31 +511,28 @@ async def _handle_streaming(
                         if not line:
                             continue
 
-                        # 转发非 data 行（如注释）
                         if not line.startswith("data: "):
                             yield f"{line}\n".encode("utf-8")
                             continue
 
-                        # OpenAI SSE 转换
                         if converter:
                             raw_chunk = line.encode("utf-8")
                             events = converter.convert_chunk(raw_chunk)
                             for event in events:
                                 yield event
                         else:
-                            # Anthropic 直接转发
                             yield f"{line}\n".encode("utf-8")
 
-            except Exception as e:
-                logger.error(f"[{request_id}] Streaming error: {e}")
-                error_json = json.dumps({"error": {"type": "upstream_error", "message": str(e)}})
-                yield f"data: {error_json}\n\n".encode("utf-8")
+        except Exception as e:
+            logger.error(f"[{request_id}] Streaming error: {e}")
+            error_json = json.dumps({"error": {"type": "upstream_error", "message": str(e)}})
+            yield f"data: {error_json}\n\n".encode("utf-8")
 
     return StreamingResponse(stream_generator(), media_type="text/event-stream")
 
 
 def _provider_config_to_dict(provider: ProviderConfig) -> dict:
-    """将 ProviderConfig 转换为 dict（供 adapter 使用）"""
+    """将 ProviderConfig 转换为 dict(供 adapter 使用)"""
     return {
         "name": provider.name,
         "api_base_url": provider.api_base_url,

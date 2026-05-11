@@ -201,10 +201,23 @@ class RoutingEngine:
                 can_handle = False
 
             if can_handle:
-                # 构建新的 fallback 链（去掉已经尝试过的）
-                new_chain = [
-                    (result.provider, result.model)  # 原 provider 作为最后的 fallback
-                ] + result.fallback_chain
+                # 构建新的 fallback 链（去掉已经尝试过的和不能满足能力的）
+                new_chain = []
+                for fb_p, fb_m in [(result.provider, result.model)] + result.fallback_chain:
+                    # 跳过不能满足当前请求能力的 provider
+                    fb_c = self._providers.get(fb_p)
+                    if not fb_c:
+                        continue
+                    fb_c_caps = fb_c.capabilities
+                    skip = False
+                    if tags.has_thinking and not fb_c_caps.get("thinking", False):
+                        skip = True
+                    if tags.has_images and not fb_c_caps.get("vision", False):
+                        skip = True
+                    if tags.has_web_search and not fb_c_caps.get("tool_use", False):
+                        skip = True
+                    if not skip:
+                        new_chain.append((fb_p, fb_m))
 
                 return RouteResult(
                     provider=fb_provider,
