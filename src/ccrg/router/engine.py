@@ -227,6 +227,6 @@ class RoutingEngine:
                     matched_reason=f"{result.matched_reason} → capability_fallback({reasons})"
                 )
 
-        # 所有 fallback 都不满足，还是用原 route
-        logger.error(f"No fallback provider satisfies capabilities: {reasons}")
+        # 所有 fallback 都不满足，还是用原 route（adapter 会剥离不支持的内容）
+        logger.warning(f"No fallback provider satisfies capabilities: {reasons}, content will be stripped by adapter")
         return result

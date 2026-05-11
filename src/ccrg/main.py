@@ -61,101 +61,155 @@ _DASHBOARD_HTML = r"""<!DOCTYPE html>
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh}
-  .header{background:linear-gradient(135deg,#1e293b,#0f172a);padding:24px 32px;border-bottom:1px solid #334155;display:flex;align-items:center;justify-content:space-between}
+  .header{background:linear-gradient(135deg,#1e293b,#0f172a);padding:20px 32px;border-bottom:1px solid #334155;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px}
   .header h1{font-size:22px;font-weight:600;color:#f1f5f9}
-  .header .badge{background:#3b82f6;color:#fff;padding:4px 12px;border-radius:12px;font-size:12px}
+  .header-right{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .badge{background:#334155;color:#94a3b8;padding:4px 10px;border-radius:12px;font-size:11px}
   .container{max-width:1200px;margin:0 auto;padding:24px}
-  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-bottom:24px}
-  .card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:20px}
-  .card .label{font-size:13px;color:#94a3b8;margin-bottom:4px}
-  .card .value{font-size:28px;font-weight:700;color:#f1f5f9}
-  .card .sub{font-size:12px;color:#64748b;margin-top:4px}
+  .filter-bar{display:flex;align-items:center;gap:8px;margin-bottom:20px;flex-wrap:wrap}
+  .filter-btn{background:#1e293b;color:#94a3b8;border:1px solid #334155;padding:7px 16px;border-radius:8px;cursor:pointer;font-size:13px;transition:all .15s}
+  .filter-btn:hover{background:#334155;color:#e2e8f0}
+  .filter-btn.active{background:#3b82f6;color:#fff;border-color:#3b82f6}
+  .filter-sep{width:1px;height:24px;background:#334155;margin:0 4px}
+  .custom-range{display:flex;align-items:center;gap:6px;font-size:13px;color:#94a3b8}
+  .custom-range input[type="datetime-local"]{background:#1e293b;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:5px 8px;font-size:12px;outline:none}
+  .custom-range input[type="datetime-local"]:focus{border-color:#3b82f6}
+  .custom-range button{background:#8b5cf6;color:#fff;border:none;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:12px}
+  .custom-range button:hover{background:#7c3aed}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:24px}
+  .card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:18px 20px}
+  .card .label{font-size:12px;color:#94a3b8;margin-bottom:4px}
+  .card .value{font-size:26px;font-weight:700;color:#f1f5f9}
+  .card .sub{font-size:11px;color:#64748b;margin-top:4px}
   .section{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:20px;margin-bottom:24px}
-  .section h2{font-size:16px;font-weight:600;margin-bottom:16px;color:#e2e8f0}
+  .section h2{font-size:15px;font-weight:600;margin-bottom:14px;color:#e2e8f9}
   table{width:100%;border-collapse:collapse;font-size:13px}
-  th{text-align:left;padding:10px 12px;color:#94a3b8;font-weight:500;border-bottom:1px solid #334155}
+  th{text-align:left;padding:10px 12px;color:#94a3b8;font-weight:500;border-bottom:1px solid #334155;font-size:12px;text-transform:uppercase;letter-spacing:.3px}
   td{padding:10px 12px;border-bottom:1px solid #1e293b}
   tr:hover td{background:#0f172a}
   .tag{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:500}
   .tag-green{background:#064e3b;color:#6ee7b7}
   .tag-red{background:#450a0a;color:#fca5a5}
   .tag-blue{background:#1e3a5f;color:#93c5fd}
-  .bar{height:8px;border-radius:4px;background:#334155;overflow:hidden;margin-top:6px}
-  .bar-fill{height:100%;border-radius:4px;transition:width .6s ease}
-  .refresh-btn{background:#3b82f6;color:#fff;border:none;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px}
-  .refresh-btn:hover{background:#2563eb}
+  .bar{height:6px;border-radius:3px;background:#334155;overflow:hidden;margin-top:4px}
+  .bar-fill{height:100%;border-radius:3px;transition:width .6s ease}
   .empty{text-align:center;color:#64748b;padding:40px;font-size:14px}
-  @keyframes spin{to{transform:rotate(360deg)}}
-  .loading{animation:spin 1s linear infinite;display:inline-block}
+  .range-label{font-size:12px;color:#64748b;margin-bottom:16px}
+  #custom-fields{display:none}
+  #custom-fields.show{display:flex}
 </style>
 </head>
 <body>
 <div class="header">
   <h1>CCRG Dashboard</h1>
-  <div style="display:flex;align-items:center;gap:12px">
-    <span class="badge" id="auto-badge">Auto 10s</span>
-    <button class="refresh-btn" onclick="loadStats()">Refresh</button>
+  <div class="header-right">
+    <span class="badge" id="auto-badge">Auto 30s</span>
   </div>
 </div>
 <div class="container">
-  <div class="cards" id="summary-cards"></div>
+  <div class="filter-bar">
+    <button class="filter-btn" data-range="1h" onclick="setRange('1h')">最近1小时</button>
+    <button class="filter-btn active" data-range="today" onclick="setRange('today')">今天</button>
+    <button class="filter-btn" data-range="month" onclick="setRange('month')">本月</button>
+    <button class="filter-btn" data-range="year" onclick="setRange('year')">今年</button>
+    <div class="filter-sep"></div>
+    <button class="filter-btn" data-range="custom" onclick="setRange('custom')">自定义</button>
+    <div id="custom-fields" class="custom-range">
+      <input type="datetime-local" id="start-dt">
+      <span>~</span>
+      <input type="datetime-local" id="end-dt">
+      <button onclick="applyCustom()">查询</button>
+    </div>
+  </div>
+  <div class="range-label" id="range-label"></div>
+  <div class="cards" id="range-cards"></div>
   <div class="section">
-    <h2>Today's Usage by Provider</h2>
-    <div id="today-table"></div>
+    <h2>各 Provider 用量明细</h2>
+    <div id="range-table"></div>
   </div>
   <div class="section">
-    <h2>All-time Summary</h2>
+    <h2>历史累计</h2>
     <div id="summary-table"></div>
   </div>
 </div>
 <script>
-function fmt(n){return n==null?'-':n.toLocaleString()}
-function fmtTokens(n){if(n==null)return'-';if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return n.toString()}
-function successTag(s,f){if(s+f===0)return'<span class="tag tag-blue">no data</span>';const r=s/(s+f);return r>=0.9?'<span class="tag tag-green">'+s+'/'+(s+f)+' ('+(r*100).toFixed(0)+'%)</span>':'<span class="tag tag-red">'+s+'/'+(s+f)+' ('+(r*100).toFixed(0)+'%)</span>'}
-function barHtml(pct,color){return'<div class="bar"><div class="bar-fill" style="width:'+Math.min(pct,100)+'%;background:'+color+'"></div></div>'}
 const COLORS=['#3b82f6','#8b5cf6','#ec4899','#f59e0b','#10b981','#ef4444'];
-function renderSummaryCards(summary){
-  const el=document.getElementById('summary-cards');
-  const t=summary.total_tokens||0,r=summary.total_requests||0,pCount=Object.keys(summary.providers||{}).length;
-  el.innerHTML=`
-    <div class="card"><div class="label">Total Requests</div><div class="value">${fmt(r)}</div></div>
-    <div class="card"><div class="label">Total Tokens</div><div class="value">${fmtTokens(t)}</div><div class="sub">${fmt(t)} tokens</div></div>
-    <div class="card"><div class="label">Providers</div><div class="value">${pCount}</div></div>`;
+const RANGE_LABELS={1h:'最近1小时',today:'今天',month:'本月',year:'今年',custom:'自定义'};
+let curRange='today',curStart=null,curEnd=null;
+
+function fmt(n){return n==null?'-':n.toLocaleString()}
+function fmtT(n){if(n==null)return'-';if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return n.toString()}
+function fmtMs(ms){if(!ms)return'-';return ms<1000?Math.round(ms)+'ms':(ms/1000).toFixed(1)+'s'}
+function sTag(s,f){if(s+f===0)return'<span class="tag tag-blue">-</span>';const r=s/(s+f);return r>=0.9?'<span class="tag tag-green">'+s+'/'+(s+f)+'</span>':'<span class="tag tag-red">'+s+'/'+(s+f)+'</span>'}
+function barH(pct,c){return'<div class="bar"><div class="bar-fill" style="width:'+Math.min(pct,100)+'%;background:'+c+'"></div></div>'}
+
+function setRange(r){
+  curRange=r;
+  document.querySelectorAll('.filter-btn').forEach(b=>b.classList.toggle('active',b.dataset.range===r));
+  const cf=document.getElementById('custom-fields');
+  if(r==='custom'){cf.classList.add('show');return}
+  cf.classList.remove('show');
+  loadStats();
 }
-function renderTodayTable(today){
-  const el=document.getElementById('today-table');
-  const entries=Object.entries(today||{});
-  if(!entries.length){el.innerHTML='<div class="empty">No data for today</div>';return}
-  let maxTokens=0;entries.forEach(([_,d])=>{if(d.total_tokens>maxTokens)maxTokens=d.total_tokens});
-  let html='<table><tr><th>Provider</th><th>Models</th><th>Requests</th><th>Success</th><th>Input</th><th>Output</th><th>Total Tokens</th><th>Avg Latency</th></tr>';
+function applyCustom(){
+  const s=document.getElementById('start-dt').value;
+  const e=document.getElementById('end-dt').value;
+  if(!s||!e)return;
+  curStart=new Date(s).toISOString();
+  curEnd=new Date(e).toISOString();
+  loadStats();
+}
+function toLocal(dt){const d=new Date(dt);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')+' '+String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')}
+
+function renderRangeCards(data){
+  const el=document.getElementById('range-cards');
+  let tReq=0,tIn=0,tOut=0,tTok=0,tOk=0,tFail=0;
+  Object.values(data).forEach(d=>{tReq+=d.request_count;tIn+=d.input_tokens;tOut+=d.output_tokens;tTok+=d.total_tokens;tOk+=d.success_count;tFail+=d.fail_count});
+  el.innerHTML=`
+    <div class="card"><div class="label">请求数</div><div class="value">${fmt(tReq)}</div><div class="sub">${sTag(tOk,tFail)}</div></div>
+    <div class="card"><div class="label">输入 Tokens</div><div class="value" style="color:#60a5fa">${fmtT(tIn)}</div></div>
+    <div class="card"><div class="label">输出 Tokens</div><div class="value" style="color:#fbbf24">${fmtT(tOut)}</div></div>
+    <div class="card"><div class="label">总计 Tokens</div><div class="value" style="color:#c084fc">${fmtT(tTok)}</div><div class="sub">${fmt(tTok)} tokens</div></div>`;
+}
+function renderRangeTable(data){
+  const el=document.getElementById('range-table');
+  const entries=Object.entries(data||{});
+  if(!entries.length){el.innerHTML='<div class="empty">该时间段暂无数据</div>';return}
+  let mx=0;entries.forEach(([_,d])=>{if(d.total_tokens>mx)mx=d.total_tokens});
+  let h='<table><tr><th>Provider</th><th>Models</th><th>请求数</th><th>成功/失败</th><th>输入</th><th>输出</th><th>总计 Tokens</th><th>平均延迟</th></tr>';
   entries.forEach(([name,d],i)=>{
     const c=COLORS[i%COLORS.length];
-    html+=`<tr><td style="font-weight:600;color:${c}">${name}</td><td style="font-size:11px;color:#94a3b8">${(d.models||[]).join(', ')}</td><td>${fmt(d.request_count)}</td><td>${successTag(d.success_count,d.fail_count)}</td><td>${fmtTokens(d.input_tokens)}</td><td>${fmtTokens(d.output_tokens)}</td><td>${fmtTokens(d.total_tokens)}${barHtml(maxTokens?d.total_tokens/maxTokens*100:0,c)}</td><td>${d.avg_latency_ms?d.avg_latency_ms.toFixed(0)+'ms':'-'}</td></tr>`;
+    h+=`<tr><td style="font-weight:600;color:${c}">${name}</td><td style="font-size:11px;color:#94a3b8">${(d.models||[]).join(', ')}</td><td>${fmt(d.request_count)}</td><td>${sTag(d.success_count,d.fail_count)}</td><td>${fmtT(d.input_tokens)}</td><td>${fmtT(d.output_tokens)}</td><td>${fmtT(d.total_tokens)}${barH(mx?d.total_tokens/mx*100:0,c)}</td><td>${fmtMs(d.avg_latency_ms)}</td></tr>`;
   });
-  html+='</table>';el.innerHTML=html;
+  h+='</table>';el.innerHTML=h;
 }
 function renderSummaryTable(summary){
   const el=document.getElementById('summary-table');
   const entries=Object.entries(summary.providers||{});
-  if(!entries.length){el.innerHTML='<div class="empty">No historical data</div>';return}
-  let maxTokens=0;entries.forEach(([_,d])=>{if(d.total_tokens>maxTokens)maxTokens=d.total_tokens});
-  let html='<table><tr><th>Provider</th><th>Total Requests</th><th>Total Tokens</th></tr>';
+  if(!entries.length){el.innerHTML='<div class="empty">暂无历史数据</div>';return}
+  let mx=0;entries.forEach(([_,d])=>{if(d.total_tokens>mx)mx=d.total_tokens});
+  let h='<table><tr><th>Provider</th><th>总请求数</th><th>总 Tokens</th></tr>';
   entries.forEach(([name,d],i)=>{
     const c=COLORS[i%COLORS.length];
-    html+=`<tr><td style="font-weight:600;color:${c}">${name}</td><td>${fmt(d.total_requests)}</td><td>${fmtTokens(d.total_tokens)}${barHtml(maxTokens?d.total_tokens/maxTokens*100:0,c)}</td></tr>`;
+    h+=`<tr><td style="font-weight:600;color:${c}">${name}</td><td>${fmt(d.total_requests)}</td><td>${fmtT(d.total_tokens)}${barH(mx?d.total_tokens/mx*100:0,c)}</td></tr>`;
   });
-  html+='</table>';el.innerHTML=html;
+  h+='</table>';el.innerHTML=h;
 }
 async function loadStats(){
+  let url='/stats?range='+curRange;
+  if(curRange==='custom'&&curStart&&curEnd) url+='&start='+encodeURIComponent(curStart)+'&end='+encodeURIComponent(curEnd);
   try{
-    const resp=await fetch('/stats');const data=await resp.json();
-    renderSummaryCards(data.summary||{});
-    renderTodayTable(data.today||{});
+    const resp=await fetch(url);const data=await resp.json();
+    const rl=document.getElementById('range-label');
+    rl.textContent=RANGE_LABELS[curRange]||curRange;
+    if(curRange==='custom'&&curStart&&curEnd) rl.textContent+=' ('+toLocal(curStart)+' ~ '+toLocal(curEnd)+')';
+    renderRangeCards(data.range||{});
+    renderRangeTable(data.range||{});
     renderSummaryTable(data.summary||{});
-  }catch(e){console.error('Failed to load stats:',e)}
+  }catch(e){console.error('Failed:',e)}
 }
 loadStats();
-setInterval(loadStats,10000);
+setInterval(loadStats,30000);
 </script>
 </body>
 </html>"""
@@ -182,12 +236,31 @@ def init_app(config_path: str | None = None) -> FastAPI:
         return {"status": "ok", "providers": providers}
 
     @app.get("/stats")
-    async def stats():
-        """今日各 provider 的 token 使用统计"""
-        today_stats = _usage_stats.get_today() if _usage_stats else {}
+    async def stats(range: str = "today", start: str | None = None, end: str | None = None):
+        """Token 使用统计，支持时间范围查询"""
+        from datetime import datetime, timedelta
+
+        now = datetime.now()
+        range_data = {}
+
+        if range == "custom" and start and end:
+            s = datetime.fromisoformat(start)
+            e = datetime.fromisoformat(end)
+            range_data = _usage_stats.get_range(s, e) if _usage_stats else {}
+        elif range == "1h":
+            range_data = _usage_stats.get_range(now - timedelta(hours=1), now) if _usage_stats else {}
+        elif range == "today":
+            range_data = _usage_stats.get_today() if _usage_stats else {}
+        elif range == "month":
+            range_data = _usage_stats.get_range(now.replace(day=1, hour=0, minute=0, second=0, microsecond=0), now) if _usage_stats else {}
+        elif range == "year":
+            range_data = _usage_stats.get_range(now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0), now) if _usage_stats else {}
+        else:
+            range_data = _usage_stats.get_today() if _usage_stats else {}
+
         summary = _usage_stats.get_summary() if _usage_stats else {}
         return {
-            "today": today_stats,
+            "range": range_data,
             "summary": summary,
         }
 
@@ -259,12 +332,13 @@ async def _handle_request(request: Request) -> Response:
         return error_resp
 
     # 5. 发送请求（带 fallback）
-    timeout = _config.server.get("timeout_ms", 600000) / 1000
+    default_timeout = _config.server.get("timeout_ms", 600000) / 1000
 
     # 先尝试主 provider，然后是 fallback
     providers_to_try = [(route_result.provider, route_result.model)] + list(route_result.fallback_chain)
 
     last_error = None
+    retried_with_stripped = set()  # 已尝试过剥离重试的 provider
     for prov_name, model in providers_to_try:
         try:
             # 获取 provider 配置
@@ -288,18 +362,21 @@ async def _handle_request(request: Request) -> Response:
                 "Authorization": f"Bearer {prov_config.api_key}",
             }
 
-            logger.info(f"[{request_id}] Calling {prov_name} at {prov_target_url}")
+            # 获取 provider 对应的超时时间
+            prov_timeout = (prov_config.timeout_ms or _config.server.get("timeout_ms", 600000)) / 1000
+
+            logger.info(f"[{request_id}] Calling {prov_name} at {prov_target_url} (timeout={prov_timeout:.0f}s)")
 
             if body.get("stream"):
                 # 流式请求 - 使用独立函数处理，支持 fallback 重试
                 return await _handle_streaming_with_fallback(
                     request_id, body, providers_to_try,
                     _provider_config_to_dict, _registry, _get_adapter_for_provider,
-                    _usage_stats, route_result.matched_rule, start_time, timeout
+                    _usage_stats, route_result.matched_rule, start_time, default_timeout
                 )
             else:
                 # 非流式请求
-                async with httpx.AsyncClient(timeout=timeout) as client:
+                async with httpx.AsyncClient(timeout=prov_timeout) as client:
                     response = await client.post(prov_target_url, json=req_for_provider, headers=prov_headers)
                     response.raise_for_status()
 
@@ -334,6 +411,51 @@ async def _handle_request(request: Request) -> Response:
             except Exception:
                 pass
             logger.warning(f"[{request_id}] {prov_name} returned {e.response.status_code}: {error_body}")
+
+            # 400 且错误信息表明模型不支持某功能 → 剥离该功能并重试
+            if e.response.status_code == 400 and prov_name not in retried_with_stripped:
+                stripped = _strip_unsupported_features(body, error_body)
+                if stripped is not body:
+                    retried_with_stripped.add(prov_name)
+                    logger.info(f"[{request_id}] {prov_name} doesn't support some features, stripping and retrying")
+                    # 用剥离后的 body 重试当前 provider
+                    try:
+                        req_for_provider = prov_adapter.transform_request(stripped, _provider_config_to_dict(prov_config))
+                        req_for_provider["model"] = model
+                        prov_timeout = (prov_config.timeout_ms or _config.server.get("timeout_ms", 600000)) / 1000
+
+                        if body.get("stream"):
+                            # 流式请求用剥离后的 body 重新走 fallback 链
+                            remaining = [(prov_name, model)] + [
+                                (p, m) for p, m in providers_to_try
+                                if (p, m) != (prov_name, model)
+                            ]
+                            return await _handle_streaming_with_fallback(
+                                request_id, stripped, remaining,
+                                _provider_config_to_dict, _registry, _get_adapter_for_provider,
+                                _usage_stats, route_result.matched_rule, start_time, default_timeout
+                            )
+                        else:
+                            async with httpx.AsyncClient(timeout=prov_timeout) as client:
+                                response = await client.post(prov_target_url, json=req_for_provider, headers=prov_headers)
+                                response.raise_for_status()
+                                resp_data = response.json()
+                                transformed_resp = prov_adapter.transform_json_response(resp_data)
+                                latency_ms = (time.time() - start_time) * 1000
+                                if _usage_stats and isinstance(transformed_resp, dict):
+                                    usage = transformed_resp.get("usage", {})
+                                    _usage_stats.record(
+                                        provider=prov_name, model=model,
+                                        input_tokens=usage.get("input_tokens", 0),
+                                        output_tokens=usage.get("output_tokens", 0),
+                                        latency_ms=latency_ms, success=True,
+                                        route_rule=route_result.matched_rule,
+                                    )
+                                logger.info(f"[{request_id}] Success from {prov_name} (stripped), latency={latency_ms/1000:.3f}s")
+                                return JSONResponse(content=transformed_resp)
+                    except Exception as retry_e:
+                        logger.warning(f"[{request_id}] {prov_name} retry after strip also failed: {retry_e}")
+
             if _usage_stats:
                 _usage_stats.record(
                     provider=prov_name, model=model,
@@ -375,14 +497,16 @@ async def _handle_streaming_with_fallback(
     usage_stats,
     matched_rule: str,
     start_time: float,
-    timeout: float
+    default_timeout: float
 ) -> StreamingResponse:
     """处理流式请求(带 fallback 支持)"""
     from .protocol.openai_sse import OpenAISSEConverter
 
     provider_index = [0]  # 用列表包装以便在闭包中修改
+    retried_with_stripped = set()  # 已尝试过剥离重试的 provider
 
     async def stream_generator() -> AsyncGenerator[bytes, None]:
+        nonlocal original_body
         last_error = None
 
         while provider_index[0] < len(providers_to_try):
@@ -392,6 +516,9 @@ async def _handle_streaming_with_fallback(
             prov_config = registry.get(prov_name)
             if not prov_config:
                 continue
+
+            # 获取 provider 对应的超时时间
+            prov_timeout = (prov_config.timeout_ms / 1000) if prov_config.timeout_ms else default_timeout
 
             prov_adapter = get_adapter(prov_name)
 
@@ -408,10 +535,10 @@ async def _handle_streaming_with_fallback(
                 "Authorization": f"Bearer {prov_config.api_key}",
             }
 
-            logger.info(f"[{request_id}] Calling {prov_name} at {target_url}")
+            logger.info(f"[{request_id}] Calling {prov_name} at {target_url} (timeout={prov_timeout:.0f}s)")
 
             try:
-                async with httpx.AsyncClient(timeout=timeout) as client:
+                async with httpx.AsyncClient(timeout=prov_timeout) as client:
                     async with client.stream("POST", target_url, json=req_for_provider, headers=headers) as response:
                         response.raise_for_status()
 
@@ -454,7 +581,25 @@ async def _handle_streaming_with_fallback(
                             return  # 成功完成，退出
 
             except httpx.HTTPStatusError as e:
-                logger.warning(f"[{request_id}] {prov_name} returned {e.response.status_code}")
+                error_body = ""
+                try:
+                    error_body = e.response.text[:500]
+                except Exception:
+                    pass
+                logger.warning(f"[{request_id}] {prov_name} returned {e.response.status_code}: {error_body}")
+
+                # 400 且错误信息表明模型不支持某功能 → 剥离该功能并重试
+                if e.response.status_code == 400 and prov_name not in retried_with_stripped:
+                    stripped = _strip_unsupported_features(original_body, error_body)
+                    if stripped is not original_body:
+                        retried_with_stripped.add(prov_name)
+                        logger.info(f"[{request_id}] {prov_name} doesn't support some features, stripping and retrying")
+                        # 将当前 provider 重新加入队列
+                        providers_to_try.insert(provider_index[0], (prov_name, model))
+                        # 替换 original_body 为剥离后的版本
+                        original_body = stripped
+                        continue
+
                 last_error = e
                 continue
             except Exception as e:
@@ -482,7 +627,60 @@ async def _handle_streaming_with_fallback(
     return StreamingResponse(stream_generator(), media_type="text/event-stream")
 
 
-async def _handle_streaming(
+def _strip_unsupported_features(body: dict, error_body: str) -> dict:
+    """根据 upstream 400 错误信息，剥离请求中不支持的功能
+
+    检测常见的不支持错误：
+    - image_url / image 不支持 -> 剥离图片内容块
+    - thinking 不支持 -> 剥离 thinking 字段
+    返回修改后的 body；如果不需要修改则返回原 body。
+    """
+    changed = False
+    result = body
+
+    # 检测图片相关不支持错误
+    image_keywords = ["image_url", "image content", "vision", "not supported by certain models"]
+    if any(kw.lower() in error_body.lower() for kw in image_keywords):
+        result = _strip_image_blocks(result)
+        if result is not body:
+            changed = True
+
+    # 检测 thinking 相关不支持错误
+    thinking_keywords = ["thinking", "extended thinking", "thinking_mode"]
+    if any(kw.lower() in error_body.lower() for kw in thinking_keywords):
+        if "thinking" in result:
+            result = dict(result)
+            del result["thinking"]
+            changed = True
+
+    return result
+
+
+def _strip_image_blocks(body: dict) -> dict:
+    """从请求中移除所有 image 内容块，替换为 [image] 文本"""
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return body
+
+    changed = False
+    new_messages = []
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            new_content = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "image":
+                    changed = True
+                    new_content.append({"type": "text", "text": "[image]"})
+                else:
+                    new_content.append(block)
+            if changed:
+                msg = dict(msg, content=new_content)
+        new_messages.append(msg)
+
+    if changed:
+        return dict(body, messages=new_messages)
+    return body
     request_id: str,
     url: str,
     headers: dict,
@@ -543,6 +741,7 @@ def _provider_config_to_dict(provider: ProviderConfig) -> dict:
         "cost_tier": provider.cost_tier,
         "default_params": provider.default_params,
         "retry": provider.retry,
+        "timeout_ms": provider.timeout_ms,
     }
 
 

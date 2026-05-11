@@ -38,6 +38,10 @@ class AnthropicAdapter(ProtocolAdapter):
         if not capabilities.get("thinking", False) and "thinking" in result:
             del result["thinking"]
 
+        # 5. 如果 provider 不支持 vision，剥离 image 内容块
+        if not capabilities.get("vision", False):
+            result = _strip_images(result)
+
         return result
 
     def get_target_url(self, provider_config: dict, model: str | None = None) -> str:
@@ -98,3 +102,31 @@ def extract_system(request: dict) -> str:
                 parts.append(str(item))
         return "\n".join(parts)
     return ""
+
+
+def _strip_images(request: dict) -> dict:
+    """从请求中移除 image 内容块，保留文本描述"""
+    messages = request.get("messages")
+    if not isinstance(messages, list):
+        return request
+
+    changed = False
+    new_messages = []
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            new_content = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "image":
+                    changed = True
+                    # 用文本占位替代，保留上下文连贯性
+                    new_content.append({"type": "text", "text": "[image]"})
+                else:
+                    new_content.append(block)
+            if changed:
+                msg = dict(msg, content=new_content)
+        new_messages.append(msg)
+
+    if changed:
+        request = dict(request, messages=new_messages)
+    return request
