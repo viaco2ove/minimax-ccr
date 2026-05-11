@@ -18,8 +18,13 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from urllib.parse import urlparse
 from dotenv import load_dotenv
+from pathlib import Path
 
-load_dotenv()
+# 优先加载 .mmx.env，再加载 .env
+MMX_ENV = Path(__file__).parent / ".mmx.env"
+if MMX_ENV.exists():
+    load_dotenv(MMX_ENV)
+load_dotenv()  # .env 作为补充
 
 # 日志配置
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()

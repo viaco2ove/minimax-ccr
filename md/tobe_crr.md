@@ -1,6 +1,29 @@
-取代claude-code-router （ccr） 
-# 写一个很薄的 Router。
+取代claude-code-router （ccr） ->claude-code-router-gateway
+# 目的1
+## 命中codeplan 直接对接 codeplan 对应的接口：https://api.minimaxi.com/anthropic 
+而不是非codeplan的 按https://api.minimaxi.com/anthropic/v1/messages
 
+
+维度	CCR关注	你关注
+模型调用	✔	✔
+协议统一	✔	✔
+任务路由	❌（弱）	✔
+套餐命中（Code Plan）	❌	✔
+Anthropic 原生链路保留	部分	必须
+
+## 更符合模型能力特性和价格的分流方案
+CCR 的分流是简单分层 + fallback，只解决稳定性和接口统一问题。
+如果你想要经济 + 智能任务路由 + Code Plan 命中，CCR 的分流还远远不够。
+
+# 写一个很薄的 Router。
+  Claude Code
+      ↓
+  claude-code-router-gateway （你要写的，薄薄一层）
+      ├─ 便宜任务 → mmx_provider (CodePlan 套餐)
+      ├─ 复杂任务 → CCR (DeepSeek/Claude)
+      └─ 图片/搜索 → mmx CLI 直接调用
+
+ 用[.gateway.json](../.gateway.json)  来配置gateway
 ---
 
 你现在这个需求：
@@ -44,7 +67,7 @@ LiteLLM 也不行。
 逻辑：
 
 ```python id="hmdb0n"
-@app.post("/v1/messages")
+@app.post("/gateway/messages")
 async def route(req):
 
     text = extract_text(req)
