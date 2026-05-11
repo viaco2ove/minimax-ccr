@@ -1,0 +1,156 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 3458,
+    "timeout_ms": 600000,
+    "log_level": "info",
+    "log_file": "logs/ccrg.log",
+    "proxy_url": "",
+    "api_key": "",
+    "claude_path": ""
+  },
+  "providers": {
+    "minimax": {
+      "api_base_url": "https://api.minimaxi.com/anthropic",
+      "api_key": "your_minimax_api_key_here",
+      "protocol": "anthropic",
+      "models": ["MiniMax-M2.7"],
+      "capabilities": {
+        "tool_use": true,
+        "streaming": true,
+        "thinking": false,
+        "vision": true,
+        "max_context": 128000
+      },
+      "cost_tier": "cheap",
+      "default_params": {
+        "max_tokens": 4096
+      },
+      "retry": {
+        "max_attempts": 2,
+        "retry_on_status": [429, 500, 502, 503]
+      }
+    },
+    "qianfan": {
+      "api_base_url": "https://qianfan.baidubce.com/anthropic/coding",
+      "api_key": "your_qianfan_api_key_here",
+      "protocol": "anthropic",
+      "models": ["qianfan-code-latest"],
+      "capabilities": {
+        "tool_use": true,
+        "streaming": true,
+        "thinking": false,
+        "vision": false,
+        "max_context": 128000
+      },
+      "cost_tier": "cheap",
+      "retry": {
+        "max_attempts": 1,
+        "retry_on_status": [429, 500]
+      }
+    },
+    "deepseek": {
+      "api_base_url": "https://api.deepseek.com",
+      "api_key": "your_deepseek_api_key_here",
+      "protocol": "openai",
+      "models": ["deepseek-chat", "deepseek-reasoner", "deepseek-v4-pro"],
+      "capabilities": {
+        "tool_use": true,
+        "streaming": true,
+        "thinking": true,
+        "vision": false,
+        "max_context": 64000
+      },
+      "cost_tier": "premium",
+      "retry": {
+        "max_attempts": 2,
+        "retry_on_status": [429, 500, 502, 503]
+      }
+    }
+  },
+  "routing": {
+    "default": "minimax:MiniMax-M2.7",
+    "scenarios": {
+      "background": {
+        "route": "deepseek:deepseek-chat",
+        "fallback": ["minimax:MiniMax-M2.7"]
+      },
+      "think": {
+        "route": "deepseek:deepseek-reasoner",
+        "fallback": ["deepseek:deepseek-chat", "minimax:MiniMax-M2.7"]
+      },
+      "long_context": {
+        "route": "minimax:MiniMax-M2.7",
+        "fallback": ["deepseek:deepseek-chat"],
+        "threshold": 60000
+      },
+      "web_search": {
+        "route": "deepseek:deepseek-v4-pro",
+        "fallback": ["deepseek:deepseek-chat"]
+      },
+      "image": {
+        "route": "minimax:MiniMax-M2.7",
+        "fallback": ["deepseek:deepseek-v4-pro"]
+      }
+    },
+    "tool_routing": {
+      "cheap_tasks": {
+        "match": [
+          "Read", "Glob", "Grep",
+          "Bash(git status)", "Bash(git diff)", "Bash(git log)",
+          "Bash(ls *)", "Bash(cat *)", "Bash(head *)"
+        ],
+        "match_mode": "any",
+        "route": "minimax:MiniMax-M2.7",
+        "fallback": ["qianfan:qianfan-code-latest"]
+      },
+      "standard_tasks": {
+        "match": ["Edit", "Write", "NotebookEdit"],
+        "match_mode": "any",
+        "route": "minimax:MiniMax-M2.7",
+        "fallback": ["deepseek:deepseek-chat"]
+      },
+      "complex_tasks": {
+        "match": ["Agent", "TaskCreate", "EnterPlanMode"],
+        "match_mode": "any",
+        "route": "deepseek:deepseek-v4-pro",
+        "fallback": ["deepseek:deepseek-chat", "minimax:MiniMax-M2.7"]
+      }
+    },
+    "keyword_routing": {
+      "rules": [
+        {
+          "keywords": ["搜索", "search", "联网", "web search"],
+          "match_mode": "any",
+          "scope": "user_message",
+          "route": "deepseek:deepseek-v4-pro",
+          "fallback": ["deepseek:deepseek-chat"]
+        },
+        {
+          "keywords": ["图片", "截图", "image", "screenshot"],
+          "match_mode": "any",
+          "scope": "user_message",
+          "route": "minimax:MiniMax-M2.7",
+          "fallback": ["deepseek:deepseek-v4-pro"]
+        },
+        {
+          "keywords": ["架构", "architecture", "重构", "refactor"],
+          "match_mode": "any",
+          "scope": "user_message",
+          "route": "deepseek:deepseek-v4-pro",
+          "fallback": ["deepseek:deepseek-chat"]
+        }
+      ]
+    },
+    "priority": ["scenario", "tool_routing", "keyword_routing", "default"]
+  },
+  "quota": {
+    "minimax_codeplan": {
+      "enabled": true,
+      "provider": "minimax",
+      "track_usage": true,
+      "fallback_on_exhaust": "deepseek:deepseek-chat",
+      "warning_threshold": 0.2
+    }
+  }
+}
