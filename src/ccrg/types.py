@@ -71,6 +71,7 @@ class ProviderConfig:
     cost_tier: str = "standard"
     default_params: dict = field(default_factory=dict)
     retry: dict = field(default_factory=dict)
+    timeout_ms: int | None = None
 
     @classmethod
     def from_dict(cls, name: str, data: dict) -> "ProviderConfig":
@@ -84,6 +85,7 @@ class ProviderConfig:
             cost_tier=data.get("cost_tier", "standard"),
             default_params=data.get("default_params", {}),
             retry=data.get("retry", {}),
+            timeout_ms=data.get("timeout_ms"),
         )
 
 

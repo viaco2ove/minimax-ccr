@@ -7,7 +7,7 @@ import uuid
 from typing import Any
 
 from .base import ProtocolAdapter
-from .anthropic_adapter import extract_system, _strip_system_reminders
+from .anthropic_adapter import extract_system, _strip_system_reminders, _strip_images
 
 
 class OpenAIAdapter(ProtocolAdapter):
@@ -19,6 +19,11 @@ class OpenAIAdapter(ProtocolAdapter):
 
     def transform_request(self, request: dict, provider_config: dict) -> dict:
         """将 Anthropic 请求转换为 OpenAI 格式"""
+        # 如果 provider 不支持 vision，先剥离 image 内容块
+        capabilities = provider_config.get("capabilities", {})
+        if not capabilities.get("vision", False):
+            request = _strip_images(request)
+
         result = {}
 
         # model

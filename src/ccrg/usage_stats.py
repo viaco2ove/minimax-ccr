@@ -39,39 +39,42 @@ class UsageStats:
             self._stats[provider].append(entry)
             self._save_stats()
 
-    def get_today(self) -> dict:
-        """获取今天的统计"""
-        today = datetime.now().date()
+    def get_range(self, start: datetime, end: datetime) -> dict:
+        """获取指定时间范围的统计"""
         result = {}
 
         with self._lock:
             for provider, entries in self._stats.items():
-                today_entries = [
+                range_entries = [
                     e for e in entries
-                    if datetime.fromisoformat(e["timestamp"]).date() == today
+                    if start <= datetime.fromisoformat(e["timestamp"]) < end
                 ]
 
-                if not today_entries:
+                if not range_entries:
                     continue
 
-                total_input = sum(e["input_tokens"] for e in today_entries)
-                total_output = sum(e["output_tokens"] for e in today_entries)
-                total_tokens = total_input + total_output
-                success_count = sum(1 for e in today_entries if e["success"])
-                total_latency = sum(e["latency_ms"] for e in today_entries)
+                total_input = sum(e["input_tokens"] for e in range_entries)
+                total_output = sum(e["output_tokens"] for e in range_entries)
+                success_count = sum(1 for e in range_entries if e["success"])
+                total_latency = sum(e["latency_ms"] for e in range_entries)
 
                 result[provider] = {
-                    "request_count": len(today_entries),
+                    "request_count": len(range_entries),
                     "success_count": success_count,
-                    "fail_count": len(today_entries) - success_count,
+                    "fail_count": len(range_entries) - success_count,
                     "input_tokens": total_input,
                     "output_tokens": total_output,
-                    "total_tokens": total_tokens,
-                    "avg_latency_ms": total_latency / len(today_entries) if today_entries else 0,
-                    "models": list(set(e["model"] for e in today_entries)),
+                    "total_tokens": total_input + total_output,
+                    "avg_latency_ms": total_latency / len(range_entries),
+                    "models": list(set(e["model"] for e in range_entries)),
                 }
 
         return result
+
+    def get_today(self) -> dict:
+        """获取今天的统计"""
+        now = datetime.now()
+        return self.get_range(now.replace(hour=0, minute=0, second=0, microsecond=0), now)
 
     def get_summary(self) -> dict:
         """获取总体统计"""
