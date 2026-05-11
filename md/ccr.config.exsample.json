@@ -1,0 +1,74 @@
+{
+  "LOG": true,
+  "LOG_LEVEL": "debug",
+  "CLAUDE_PATH": "",
+  "HOST": "127.0.0.1",
+  "PORT": 3456,
+  "APIKEY": "",
+  "API_TIMEOUT_MS": "600000",
+  "PROXY_URL": "",
+  "transformers": [],
+  "Providers": [
+    {
+      "name": "deepseek",
+      "api_base_url": "https://api.deepseek.com/chat/completions",
+      "api_key": "sk-54e9ee2d087c469bb27bbc494d0f51c5",
+      "models": [
+        "deepseek-chat",
+        "deepseek-reasoner",
+        "deepseek-v4-pro"
+      ],
+      "transformer": {
+        "use": [
+          "deepseek"
+        ]
+      }
+    },
+    {
+      "name": "MiniMax-M2.7",
+      "api_base_url": "http://127.0.0.1:3457/v1/chat/completions",
+      "api_key": "local",
+      "models": [
+        "MiniMax-M2.7"
+      ],
+      "transformer": {
+        "use": [
+          "deepseek"
+        ]
+      }
+    },
+    {
+      "name": "codex-MiniMax-M2.7",
+      "api_base_url": "https://api.minimaxi.com/v1/chat/completions",
+      "api_key": "sk-cp-BgYFK1oZIWVhfvsS5N70jzERxXTlYSorFFZg5oobA8B46udD6zS0kzQ7cjAjZgjQDPruhXMI8inZpn2YoYDdWr0JgM2CJtz_x78DT80FIuetWFZQUXLuThw",
+      "models": [
+        "codex-MiniMax-M2.7"
+      ],
+      "transformer": {
+        "use": [
+          "deepseek"
+        ]
+      }
+    }
+  ],
+  "StatusLine": {
+    "enabled": true,
+    "currentStyle": "default",
+    "default": {
+      "modules": []
+    },
+    "powerline": {
+      "modules": []
+    }
+  },
+  "Router": {
+    "default": "MiniMax-M2.7,MiniMax-M2.7",
+    "background": "deepseek,deepseek-v4-pro",
+    "think": "MiniMax-M2.7,MiniMax-M2.7",
+    "longContext": "MiniMax-M2.7,MiniMax-M2.7",
+    "longContextThreshold": 60000,
+    "webSearch": "deepseek,deepseek-v4-pro",
+    "image": "deepseek,deepseek-v4-pro"
+  },
+  "CUSTOM_ROUTER_PATH": ""
+}
