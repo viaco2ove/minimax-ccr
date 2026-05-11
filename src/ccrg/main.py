@@ -681,52 +681,6 @@ def _strip_image_blocks(body: dict) -> dict:
     if changed:
         return dict(body, messages=new_messages)
     return body
-    request_id: str,
-    url: str,
-    headers: dict,
-    request: dict,
-    adapter: ProtocolAdapter,
-    provider_protocol: str = "codeplan_anthropic",
-    timeout: float = 600.0
-) -> StreamingResponse:
-    """处理单个流式请求(保留向后兼容)"""
-
-    from .protocol.openai_sse import OpenAISSEConverter
-
-    async def stream_generator() -> AsyncGenerator[bytes, None]:
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                async with client.stream("POST", url, json=request, headers=headers) as response:
-                    response.raise_for_status()
-
-                    converter = None
-                    if provider_protocol == "chat_openai":
-                        model = request.get("model", "")
-                        converter = OpenAISSEConverter(model)
-
-                    async for line in response.aiter_lines():
-                        line = line.strip()
-                        if not line:
-                            continue
-
-                        if not line.startswith("data: "):
-                            yield f"{line}\n".encode("utf-8")
-                            continue
-
-                        if converter:
-                            raw_chunk = line.encode("utf-8")
-                            events = converter.convert_chunk(raw_chunk)
-                            for event in events:
-                                yield event
-                        else:
-                            yield f"{line}\n".encode("utf-8")
-
-        except Exception as e:
-            logger.error(f"[{request_id}] Streaming error: {e}")
-            error_json = json.dumps({"error": {"type": "upstream_error", "message": str(e)}})
-            yield f"data: {error_json}\n\n".encode("utf-8")
-
-    return StreamingResponse(stream_generator(), media_type="text/event-stream")
 
 
 def _provider_config_to_dict(provider: ProviderConfig) -> dict:
