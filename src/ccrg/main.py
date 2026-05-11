@@ -134,7 +134,7 @@ _DASHBOARD_HTML = r"""<!DOCTYPE html>
 </div>
 <script>
 const COLORS=['#3b82f6','#8b5cf6','#ec4899','#f59e0b','#10b981','#ef4444'];
-const RANGE_LABELS={1h:'最近1小时',today:'今天',month:'本月',year:'今年',custom:'自定义'};
+const RANGE_LABELS={"1h":'最近1小时',"today":'今天',"month":'本月',"year":'今年',"custom":'自定义'};
 let curRange='today',curStart=null,curEnd=null;
 
 function fmt(n){return n==null?'-':n.toLocaleString()}

@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc *)",
+      "Bash(npm run *)",
+      "Bash(mmx --version)"
+    ]
+  },
+  "outputStyle": "default",
+  "prefersReducedMotion": true
+}
