@@ -2,6 +2,7 @@
 CCRG FastAPI 主入口。
 """
 
+import json
 import logging
 import time
 import uuid
@@ -19,11 +20,22 @@ from .classifier.keyword import KeywordClassifier
 from .provider import ProviderRegistry
 from .router import RoutingEngine
 from .types import GatewayConfig, ProviderConfig, RequestTags
+from .usage_stats import get_usage_stats
 
 # 配置日志
+import os
+from pathlib import Path
+
+log_file = Path("logs/ccrg.log")
+log_file.parent.mkdir(parents=True, exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(log_file, encoding="utf-8"),
+    ],
 )
 logger = logging.getLogger("ccrg")
 
@@ -34,17 +46,19 @@ app: FastAPI | None = None
 _config: GatewayConfig | None = None
 _registry: ProviderRegistry | None = None
 _routing_engine: RoutingEngine | None = None
+_usage_stats = None
 _classifier_scenario = ScenarioClassifier()
 _classifier_tool = ToolTypeClassifier()
 
 
 def init_app(config_path: str | None = None) -> FastAPI:
     """初始化 FastAPI 应用"""
-    global _config, _registry, _routing_engine, app
+    global _config, _registry, _routing_engine, _usage_stats, app
 
     _config = load_config(config_path)
     _registry = ProviderRegistry(_config)
     _routing_engine = RoutingEngine(_config)
+    _usage_stats = get_usage_stats(_config)
 
     app = FastAPI(title="Claude Code Router Gateway")
 
@@ -56,6 +70,16 @@ def init_app(config_path: str | None = None) -> FastAPI:
     async def health():
         providers = list(_config.providers.keys()) if _config else []
         return {"status": "ok", "providers": providers}
+
+    @app.get("/stats")
+    async def stats():
+        """今日各 provider 的 token 使用统计"""
+        today_stats = _usage_stats.get_today() if _usage_stats else {}
+        summary = _usage_stats.get_summary() if _usage_stats else {}
+        return {
+            "today": today_stats,
+            "summary": summary,
+        }
 
     @app.get("/")
     async def root():
@@ -137,50 +161,92 @@ async def _handle_request(request: Request) -> Response:
     timeout = _config.server.get("timeout_ms", 600000) / 1000
 
     # 先尝试主 provider，然后是 fallback
-    providers_to_try = [(route_result.provider, route_result.model, adapter)] + [
-        (fb_provider, fb_model, _get_adapter_for_provider(fb_provider))
-        for fb_provider, fb_model in route_result.fallback_chain
-    ]
+    providers_to_try = [(route_result.provider, route_result.model)] + list(route_result.fallback_chain)
 
     last_error = None
-    for prov_name, model, prov_adapter in providers_to_try:
+    for prov_name, model in providers_to_try:
         try:
+            # 获取 provider 配置
+            prov_config = _registry.get(prov_name)
+            if not prov_config:
+                continue
+
+            # 获取 provider 对应的 adapter
+            prov_adapter = _get_adapter_for_provider(prov_name)
+            prov_protocol = prov_config.protocol
+
+            # 获取 provider 对应的 target_url 和 headers
+            prov_target_url = prov_adapter.get_target_url(_provider_config_to_dict(prov_config), model)
+            if not prov_target_url.startswith("http"):
+                prov_target_url = f"http://{prov_target_url}"
+
+            prov_headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {prov_config.api_key}",
+            }
+
             # 更新请求中的 model
             req_for_provider = dict(transformed_request)
             req_for_provider["model"] = model
 
-            logger.info(f"[{request_id}] Calling {prov_name} at {target_url}")
+            logger.info(f"[{request_id}] Calling {prov_name} at {prov_target_url}")
 
-            # 获取 provider 协议
-            prov_config = _registry.get(prov_name)
-            prov_protocol = prov_config.protocol if prov_config else "codeplan_anthropic"
-
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                if body.get("stream"):
-                    # 流式请求
-                    return await _handle_streaming(
-                        request_id, client, target_url, headers, req_for_provider,
-                        prov_adapter, provider_protocol=prov_protocol
-                    )
-                else:
-                    # 非流式请求
-                    response = await client.post(target_url, json=req_for_provider, headers=headers)
+            if body.get("stream"):
+                # 流式请求 - client 生命周期由 StreamingResponse 管理
+                return await _handle_streaming(
+                    request_id, prov_target_url, prov_headers, req_for_provider,
+                    prov_adapter, prov_protocol, timeout
+                )
+            else:
+                # 非流式请求
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    response = await client.post(prov_target_url, json=req_for_provider, headers=prov_headers)
                     response.raise_for_status()
 
                     resp_data = response.json()
                     transformed_resp = prov_adapter.transform_json_response(resp_data)
 
-                    latency = time.time() - start_time
-                    logger.info(f"[{request_id}] Success from {prov_name}, latency={latency:.3f}s")
+                    latency_ms = (time.time() - start_time) * 1000
+
+                    # 记录 usage stats
+                    if _usage_stats and isinstance(transformed_resp, dict):
+                        usage = transformed_resp.get("usage", {})
+                        input_tokens = usage.get("input_tokens", 0)
+                        output_tokens = usage.get("output_tokens", 0)
+                        _usage_stats.record(
+                            provider=prov_name,
+                            model=model,
+                            input_tokens=input_tokens,
+                            output_tokens=output_tokens,
+                            latency_ms=latency_ms,
+                            success=True,
+                            route_rule=route_result.matched_rule,
+                        )
+
+                    logger.info(f"[{request_id}] Success from {prov_name}, latency={latency_ms/1000:.3f}s")
 
                     return JSONResponse(content=transformed_resp)
 
         except httpx.HTTPStatusError as e:
             logger.warning(f"[{request_id}] {prov_name} returned {e.response.status_code}")
+            if _usage_stats:
+                _usage_stats.record(
+                    provider=prov_name, model=model,
+                    input_tokens=0, output_tokens=0,
+                    latency_ms=(time.time() - start_time) * 1000,
+                    success=False, route_rule=route_result.matched_rule,
+                )
             last_error = e
             continue
         except Exception as e:
             logger.warning(f"[{request_id}] {prov_name} error: {e}")
+            if _usage_stats:
+                _usage_stats.record(
+                    provider=prov_name, model=model,
+                    input_tokens=0, output_tokens=0,
+                    latency_ms=(time.time() - start_time) * 1000,
+                    success=False, route_rule=route_result.matched_rule,
+                )
             last_error = e
             continue
 
@@ -196,52 +262,54 @@ async def _handle_request(request: Request) -> Response:
 
 async def _handle_streaming(
     request_id: str,
-    client: httpx.AsyncClient,
     url: str,
     headers: dict,
     request: dict,
     adapter: ProtocolAdapter,
-    provider_protocol: str = "codeplan_anthropic"
+    provider_protocol: str = "codeplan_anthropic",
+    timeout: float = 600.0
 ) -> StreamingResponse:
     """处理流式请求"""
 
     from .protocol.openai_sse import OpenAISSEConverter
 
     async def stream_generator() -> AsyncGenerator[bytes, None]:
-        try:
-            async with client.stream("POST", url, json=request, headers=headers) as response:
-                response.raise_for_status()
+        # 在生成器内部创建 client，确保生命周期覆盖整个流式传输
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            try:
+                async with client.stream("POST", url, json=request, headers=headers) as response:
+                    response.raise_for_status()
 
-                # 如果是 OpenAI provider，需要转换 SSE
-                converter = None
-                if provider_protocol == "chat_openai":
-                    model = request.get("model", "")
-                    converter = OpenAISSEConverter(model)
+                    # 如果是 OpenAI provider，需要转换 SSE
+                    converter = None
+                    if provider_protocol == "chat_openai":
+                        model = request.get("model", "")
+                        converter = OpenAISSEConverter(model)
 
-                async for line in response.aiter_lines():
-                    line = line.strip()
-                    if not line:
-                        continue
+                    async for line in response.aiter_lines():
+                        line = line.strip()
+                        if not line:
+                            continue
 
-                    # 转发非 data 行（如注释）
-                    if not line.startswith("data: "):
-                        yield f"{line}\n".encode("utf-8")
-                        continue
+                        # 转发非 data 行（如注释）
+                        if not line.startswith("data: "):
+                            yield f"{line}\n".encode("utf-8")
+                            continue
 
-                    # OpenAI SSE 转换
-                    if converter:
-                        raw_chunk = line.encode("utf-8")
-                        events = converter.convert_chunk(raw_chunk)
-                        for event in events:
-                            yield event
-                    else:
-                        # Anthropic 直接转发
-                        yield f"{line}\n".encode("utf-8")
+                        # OpenAI SSE 转换
+                        if converter:
+                            raw_chunk = line.encode("utf-8")
+                            events = converter.convert_chunk(raw_chunk)
+                            for event in events:
+                                yield event
+                        else:
+                            # Anthropic 直接转发
+                            yield f"{line}\n".encode("utf-8")
 
-        except Exception as e:
-            logger.error(f"[{request_id}] Streaming error: {e}")
-            error_json = json.dumps({"error": {"type": "upstream_error", "message": str(e)}})
-            yield f"data: {error_json}\n\n".encode("utf-8")
+            except Exception as e:
+                logger.error(f"[{request_id}] Streaming error: {e}")
+                error_json = json.dumps({"error": {"type": "upstream_error", "message": str(e)}})
+                yield f"data: {error_json}\n\n".encode("utf-8")
 
     return StreamingResponse(stream_generator(), media_type="text/event-stream")
 

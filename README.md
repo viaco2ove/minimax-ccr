@@ -82,6 +82,24 @@ src/ccrg/
 - `GET /health` - 健康检查
 - `POST /v1/messages` - Anthropic Messages API 端点
 
+## claude-code-router
+[README-CCR.md](README-CCR.md)
+
+## Claude Code Router Gateway (CCRG)
+[overview.md](md/claude-code-router-gateway/overview.md)
+http://127.0.0.1:3428/stats
+
+
+
+  如果你看到有 "3458" 在其他地方出现，可能是有旧的进程还在跑。可以确认一下：
+
+  # 检查端口占用
+  netstat -ano | findstr 3458
+  netstat -ano | findstr 3428
+
+  如果 3458 还有进程，用 taskkill /F /PID <PID> 杀掉即可。
+
+
 ## License
 
 MIT
