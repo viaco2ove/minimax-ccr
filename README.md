@@ -64,6 +64,10 @@ model_provider = "minimax"`
 }
 ```
 
+## api 方式，非codeplan, 要买独立的套餐，因此没买
+https://api.minimaxi.com/v1/chat/completions
+https://api.minimaxi.com/anthropic/v1/messages
+
 # 问题是 minimax 似乎无法对接到 claude-code-router
 直接在本项目写个伪造成deepseek协议的服务给claude-code-router 。
 或者在claude-code-router 里增加 minimax 的转换器。那个更靠谱？
@@ -110,6 +114,8 @@ mmx update
 # 文本对话指定高速版M2.7
 mmx text chat --model MiniMax-M2.7-highspeed --message "写段Python爬虫"
 
+mmx text chat --model MiniMax-M2.7 --message "你好"
+
 # 流式输出+系统提示词+指定模型
 mmx text chat --model MiniMax-M2.7 --system "你是资深全栈工程师" --message "设计FastAPI后端架构" --stream
 ```
@@ -126,6 +132,10 @@ mmx config set --key default-music-model --value music-2.6
 # 查看当前配置
 mmx config get
 ```
+
+# 用那种transformer？
+ /v1/chat/completions + deepseek transformer 是最务实的方案。mmx_provider 只需实现 OpenAI Chat Completions 格式（比 Anthropic Messages 格式简单得多），剩下的交给
+  CCR。代码量减半，SSE 兼容性由 CCR 保证。
 
 #### 3. 环境变量（会话级临时生效）
 通过环境变量覆盖默认，适合脚本自动化场景：
@@ -179,7 +189,7 @@ mmx text chat --message "测试环境变量模型"
 ## ccr
 参考配置：
 
-[ccr.config.json](md/ccr.config.json)
+[ccr.config.json](md/ccr.config.exsample.json)
 
 # 运行
 [READEME.install.md](md/READEME.install.md)
@@ -189,12 +199,21 @@ http://127.0.0.1:3457/v1/messages
 
 
 ```
-  $body = @{
-      model = "MiniMax-M2.7"
-      messages = @(
-          @{role = "user"; content = "hello"}
-      )
-  } | ConvertTo-Json -Depth 10
+$body = @{
+  model = "MiniMax-M2.7"
+  messages = @(
+      @{role = "user"; content = "hello"}
+  )
+} | ConvertTo-Json -Depth 10
+curl -Method POST "http://127.0.0.1:3457/v1/messages" -Body $body -ContentType "application/json"
+```
 
-  curl -Method POST "http://127.0.0.1:3457/v1/messages" -Body $body -ContentType "application/json"
+```
+$body = @{
+  model = "MiniMax-M2.7"
+  messages = @(
+      @{role = "user"; content = "你好"}
+  )
+} | ConvertTo-Json -Depth 10
+curl -Method POST "http://127.0.0.1:3457/v1/messages" -Body $body -ContentType "application/json"
 ```

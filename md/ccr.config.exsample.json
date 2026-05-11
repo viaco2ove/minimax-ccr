@@ -26,14 +26,14 @@
     },
     {
       "name": "MiniMax-M2.7",
-      "api_base_url": "http://127.0.0.1:3457",
+      "api_base_url": "http://127.0.0.1:3457/v1/chat/completions",
       "api_key": "local",
       "models": [
         "MiniMax-M2.7"
       ],
       "transformer": {
         "use": [
-          "Anthropic"
+          "deepseek"
         ]
       }
     },
@@ -63,11 +63,11 @@
   },
   "Router": {
     "default": "MiniMax-M2.7,MiniMax-M2.7",
-    "background": "MiniMax-M2.7,MiniMax-M2.7",
+    "background": "deepseek,deepseek-v4-pro",
     "think": "MiniMax-M2.7,MiniMax-M2.7",
     "longContext": "MiniMax-M2.7,MiniMax-M2.7",
     "longContextThreshold": 60000,
-    "webSearch": "MiniMax-M2.7,MiniMax-M2.7",
+    "webSearch": "deepseek,deepseek-v4-pro",
     "image": "deepseek,deepseek-v4-pro"
   },
   "CUSTOM_ROUTER_PATH": ""
