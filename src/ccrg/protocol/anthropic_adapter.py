@@ -42,6 +42,20 @@ class AnthropicAdapter(ProtocolAdapter):
         if not capabilities.get("vision", False):
             result = _strip_images(result)
 
+        # 6. 处理 output_config.effort 参数，确保值有效
+        if "output_config" in result:
+            output_config = result["output_config"]
+            if isinstance(output_config, dict) and "effort" in output_config:
+                effort = output_config["effort"]
+                # 豆包等 API 只接受 low, medium, high, max
+                valid_efforts = {"low", "medium", "high", "max"}
+                if effort not in valid_efforts:
+                    # 把 xhigh 映射到 high，其他无效值映射到 medium
+                    if effort == "xhigh":
+                        output_config["effort"] = "high"
+                    else:
+                        output_config["effort"] = "medium"
+
         return result
 
     def get_target_url(self, provider_config: dict, model: str | None = None) -> str:

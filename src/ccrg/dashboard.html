@@ -145,7 +145,7 @@ function renderRangeTable(data) {
   if (!entries.length) { el.innerHTML = "<div class=\"empty\">该时间段暂无数据</div>"; return; }
   let mx = 0;
   entries.forEach(function(_, d) { if (d.total_tokens > mx) mx = d.total_tokens; });
-  let h = "<table><tr><th>Provider</th><th>Models</th><th>请求数</th><th>成功/失败</th><th>输入</th><th>输出</th><th>总计 Tokens</th><th>平均延迟</th></tr>";
+  let h = "<table><tr><th>Provider</th><th>Models</th><th>请求数</th><th>成功次数/总次数</th><th>输入</th><th>输出</th><th>总计 Tokens</th><th>平均延迟</th></tr>";
   entries.forEach(function(entry, i) {
     const name = entry[0], d = entry[1];
     const c = COLORS[i % COLORS.length];
