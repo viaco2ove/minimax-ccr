@@ -10,7 +10,7 @@ from typing import AsyncGenerator
 
 import httpx
 from httpx import HTTPStatusError
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from .config import load_config
@@ -1325,6 +1325,8 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 if isinstance(content, list):
                     text_preview = "".join(b.get("text","") for b in content if isinstance(b,dict) and b.get("type")=="text")[:300]
                     logger.info(f"[{request_id}] execute_solve resp preview: {text_preview[:200].replace(chr(10),' ')}")
+            if isinstance(resp, dict) and resp.get("error", {}).get("type") == "context_length_exceeded":
+                raise HTTPException(status_code=400, detail=resp)
             return JSONResponse(content=resp)
 
 
