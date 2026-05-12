@@ -2,6 +2,7 @@
 CCRG FastAPI 主入口。
 """
 
+import asyncio
 import json
 import logging
 import time
@@ -50,6 +51,8 @@ _routing_engine: RoutingEngine | None = None
 _usage_stats = None
 _classifier_scenario = ScenarioClassifier()
 _classifier_tool = ToolTypeClassifier()
+_provider_semaphores: dict[str, asyncio.Semaphore] = {}
+_provider_last_request_time: dict[str, float] = {}
 
 # ── Dashboard 页面 ──────────────────────────────────────────────
 
@@ -224,6 +227,16 @@ def init_app(config_path: str | None = None) -> FastAPI:
     _registry = ProviderRegistry(_config)
     _routing_engine = RoutingEngine(_config)
     _usage_stats = get_usage_stats(_config)
+
+    # 初始化 per-provider 并发控制信号量
+    global _provider_semaphores
+    _provider_semaphores.clear()
+    _provider_last_request_time.clear()
+    for name, prov in _config.providers.items():
+        delay = prov.per_request_delay_ms
+        if delay and delay > 0:
+            _provider_semaphores[name] = asyncio.Semaphore(1)
+            logger.info(f"Rate limit semaphore for {name}: per_request_delay_ms={delay}")
 
     # 设置日志级别
     log_level_str = _config.server.get("log_level", "info").upper()
@@ -930,6 +943,17 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
         logger.debug(f"[{request_id}] → [{prov_name}] req: model={model}, stream=False, first_user={preview}")
         logger.info(f"[{request_id}] Workflow {step_name}: calling {prov_name} at {prov_target_url}")
 
+        # Rate limit control: delay before request if per_request_delay_ms is configured
+        delay = prov_config.per_request_delay_ms
+        if delay and delay > 0:
+            last_time = _provider_last_request_time.get(prov_name, 0)
+            elapsed = time.time() - last_time
+            if elapsed < delay / 1000:
+                sleep_time = (delay / 1000) - elapsed
+                logger.debug(f"[{request_id}] Rate limiting {prov_name}: sleeping {sleep_time:.3f}s (elapsed={elapsed:.3f}s, delay={delay}ms)")
+                await asyncio.sleep(sleep_time)
+            _provider_last_request_time[prov_name] = time.time()
+
         try:
             async with httpx.AsyncClient(timeout=prov_timeout) as client:
                 response = await client.post(prov_target_url, json=req_for_provider, headers=prov_headers)
@@ -1056,6 +1080,17 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
         logger.debug(f"[{request_id}] → [{prov_name}] req: model={model}, stream=True, first_user={preview}")
 
         logger.info(f"[{request_id}] Workflow {step_name} streaming: {prov_name} at {prov_target_url}")
+
+        # Rate limit control: delay before request if per_request_delay_ms is configured
+        delay = prov_config.per_request_delay_ms
+        if delay and delay > 0:
+            last_time = _provider_last_request_time.get(prov_name, 0)
+            elapsed = time.time() - last_time
+            if elapsed < delay / 1000:
+                sleep_time = (delay / 1000) - elapsed
+                logger.debug(f"[{request_id}] Rate limiting {prov_name}: sleeping {sleep_time:.3f}s (elapsed={elapsed:.3f}s, delay={delay}ms)")
+                await asyncio.sleep(sleep_time)
+            _provider_last_request_time[prov_name] = time.time()
 
         try:
             async with httpx.AsyncClient(timeout=prov_timeout) as client:

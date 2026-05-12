@@ -72,6 +72,7 @@ class ProviderConfig:
     default_params: dict = field(default_factory=dict)
     retry: dict = field(default_factory=dict)
     timeout_ms: int | None = None
+    per_request_delay_ms: int | None = None
 
     @classmethod
     def from_dict(cls, name: str, data: dict) -> "ProviderConfig":
@@ -86,6 +87,7 @@ class ProviderConfig:
             default_params=data.get("default_params", {}),
             retry=data.get("retry", {}),
             timeout_ms=data.get("timeout_ms"),
+            per_request_delay_ms=data.get("per_request_delay_ms"),
         )
 
 
