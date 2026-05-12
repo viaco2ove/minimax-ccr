@@ -978,6 +978,17 @@
       "latency_ms": 1907.2902202606201,
       "success": false,
       "route_rule": "scenario.think"
+    },
+    {
+      "timestamp": "2026-05-12T10:52:57.282940",
+      "provider": "deepseek",
+      "model": "deepseek-v4-pro",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "latency_ms": 253686.9535446167,
+      "success": true,
+      "route_rule": "scenario.think"
     }
   ],
   "qianfan": [
@@ -3873,6 +3884,116 @@
       "latency_ms": 7632.946014404297,
       "success": true,
       "route_rule": "scenario.think"
+    },
+    {
+      "timestamp": "2026-05-12T10:59:50.236857",
+      "provider": "qianfan",
+      "model": "qianfan-code-latest",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "latency_ms": 5253.970623016357,
+      "success": true,
+      "route_rule": "scenario.think"
+    },
+    {
+      "timestamp": "2026-05-12T10:59:55.213203",
+      "provider": "qianfan",
+      "model": "qianfan-code-latest",
+      "input_tokens": 22987,
+      "output_tokens": 91,
+      "total_tokens": 23078,
+      "latency_ms": 4949.960470199585,
+      "success": true,
+      "route_rule": "scenario.think"
+    },
+    {
+      "timestamp": "2026-05-12T11:04:41.354058",
+      "provider": "qianfan",
+      "model": "qianfan-code-latest",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "latency_ms": 44277.82654762268,
+      "success": true,
+      "route_rule": "scenario.think"
+    },
+    {
+      "timestamp": "2026-05-12T11:05:24.978692",
+      "provider": "qianfan",
+      "model": "qianfan-code-latest",
+      "input_tokens": 28351,
+      "output_tokens": 1685,
+      "total_tokens": 30036,
+      "latency_ms": 43598.761320114136,
+      "success": true,
+      "route_rule": "scenario.think"
+    },
+    {
+      "timestamp": "2026-05-12T11:05:27.705107",
+      "provider": "qianfan",
+      "model": "qianfan-code-latest",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "latency_ms": 2652.461290359497,
+      "success": true,
+      "route_rule": "keyword_routing"
+    },
+    {
+      "timestamp": "2026-05-12T11:05:29.858407",
+      "provider": "qianfan",
+      "model": "qianfan-code-latest",
+      "input_tokens": 1541,
+      "output_tokens": 41,
+      "total_tokens": 1582,
+      "latency_ms": 2137.5200748443604,
+      "success": true,
+      "route_rule": "keyword_routing"
+    },
+    {
+      "timestamp": "2026-05-12T11:05:52.195657",
+      "provider": "qianfan",
+      "model": "qianfan-code-latest",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "latency_ms": 102716.07804298401,
+      "success": true,
+      "route_rule": "scenario.think"
+    },
+    {
+      "timestamp": "2026-05-12T11:07:14.111971",
+      "provider": "qianfan",
+      "model": "qianfan-code-latest",
+      "input_tokens": 67390,
+      "output_tokens": 3481,
+      "total_tokens": 70871,
+      "latency_ms": 81882.58957862854,
+      "success": true,
+      "route_rule": "scenario.think"
+    },
+    {
+      "timestamp": "2026-05-12T11:19:36.429816",
+      "provider": "qianfan",
+      "model": "qianfan-code-latest",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "latency_ms": 66376.73997879028,
+      "success": true,
+      "route_rule": "scenario.think"
+    },
+    {
+      "timestamp": "2026-05-12T11:21:04.192865",
+      "provider": "qianfan",
+      "model": "qianfan-code-latest",
+      "input_tokens": 138139,
+      "output_tokens": 3659,
+      "total_tokens": 141798,
+      "latency_ms": 87739.8874759674,
+      "success": true,
+      "route_rule": "scenario.think"
     }
   ],
   "minimax": [
@@ -4887,6 +5008,28 @@
       "latency_ms": 38221.27032279968,
       "success": true,
       "route_rule": "scenario.think"
+    },
+    {
+      "timestamp": "2026-05-12T11:24:36.925868",
+      "provider": "minimax",
+      "model": "MiniMax-M2.7",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "latency_ms": 99174.48425292969,
+      "success": true,
+      "route_rule": "scenario.compact"
+    },
+    {
+      "timestamp": "2026-05-12T11:25:25.580133",
+      "provider": "minimax",
+      "model": "MiniMax-M2.7",
+      "input_tokens": 27626,
+      "output_tokens": 2776,
+      "total_tokens": 30402,
+      "latency_ms": 48642.85206794739,
+      "success": true,
+      "route_rule": "scenario.compact"
     }
   ]
 }
