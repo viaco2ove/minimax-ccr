@@ -180,7 +180,7 @@ function renderRangeTable(data){
   const entries=Object.entries(data||{});
   if(!entries.length){el.innerHTML='<div class="empty">该时间段暂无数据</div>';return}
   let mx=0;entries.forEach(([_,d])=>{if(d.total_tokens>mx)mx=d.total_tokens});
-  let h='<table><tr><th>Provider</th><th>Models</th><th>请求数</th><th>成功/失败</th><th>输入</th><th>输出</th><th>总计 Tokens</th><th>平均延迟</th></tr>';
+  let h='<table><tr><th>Provider</th><th>Models</th><th>请求数</th><th>成功次数/总次数</th><th>输入</th><th>输出</th><th>总计 Tokens</th><th>平均延迟</th></tr>';
   entries.forEach(([name,d],i)=>{
     const c=COLORS[i%COLORS.length];
     h+=`<tr><td style="font-weight:600;color:${c}">${name}</td><td style="font-size:11px;color:#94a3b8">${(d.models||[]).join(', ')}</td><td>${fmt(d.request_count)}</td><td>${sTag(d.success_count,d.fail_count)}</td><td>${fmtT(d.input_tokens)}</td><td>${fmtT(d.output_tokens)}</td><td>${fmtT(d.total_tokens)}${barH(mx?d.total_tokens/mx*100:0,c)}</td><td>${fmtMs(d.avg_latency_ms)}</td></tr>`;
@@ -446,10 +446,10 @@ async def _handle_request(request: Request) -> Response:
         except httpx.HTTPStatusError as e:
             error_body = ""
             try:
-                error_body = e.response.text[:500]
+                error_body = e.response.text[:1000]
             except Exception:
                 pass
-            logger.warning(f"[{request_id}] {prov_name} returned {e.response.status_code}: {error_body}")
+            logger.error(f"[{request_id}] {prov_name} returned {e.response.status_code}: {error_body}")
 
             # 400 且错误信息表明模型不支持某功能 → 剥离该功能并重试
             if e.response.status_code == 400 and prov_name not in retried_with_stripped:
@@ -672,6 +672,7 @@ def _strip_unsupported_features(body: dict, error_body: str) -> dict:
     检测常见的不支持错误：
     - image_url / image 不支持 -> 剥离图片内容块
     - thinking 不支持 -> 剥离 thinking 字段
+    - output_config.effort 无效 -> 修正或删除 output_config
     返回修改后的 body；如果不需要修改则返回原 body。
     """
     changed = False
@@ -691,6 +692,32 @@ def _strip_unsupported_features(body: dict, error_body: str) -> dict:
             result = dict(result)
             del result["thinking"]
             changed = True
+
+    # 检测 output_config.effort 相关错误
+    effort_keywords = ["output_config.effort", "effort", "xhigh"]
+    if any(kw.lower() in error_body.lower() for kw in effort_keywords):
+        if "output_config" in result:
+            result = dict(result)
+            output_config = result["output_config"]
+            if isinstance(output_config, dict) and "effort" in output_config:
+                # 尝试修正 effort 值
+                effort = output_config["effort"]
+                valid_efforts = {"low", "medium", "high", "max"}
+                if effort not in valid_efforts:
+                    result["output_config"] = dict(output_config)
+                    if effort == "xhigh":
+                        result["output_config"]["effort"] = "high"
+                    else:
+                        result["output_config"]["effort"] = "medium"
+                    changed = True
+                else:
+                    # 如果值已经是有效的但仍然报错，尝试删除整个 output_config
+                    del result["output_config"]
+                    changed = True
+            else:
+                # 如果不是 dict 或没有 effort，删除 output_config
+                del result["output_config"]
+                changed = True
 
     return result
 
@@ -827,7 +854,7 @@ def _resolve_execute_route(body: dict, request_id: str) -> str:
         return route_str
     except Exception as e:
         logger.warning(f"[{request_id}] execute_solve routing failed ({e}), using workflow default")
-        return _config.workflow.execute_solve
+        return _config.workflow.get_execute_solve_single()
 
 
 def _is_user_initiated_message(body: dict) -> bool:
@@ -980,6 +1007,13 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 logger.debug(f"[{request_id}] ← [{prov_name}] completed, step={step_name}")
                 return resp_data, False
         except HTTPStatusError as e:
+            # 记录详细的错误响应信息
+            try:
+                error_text = e.response.text
+                logger.error(f"[{request_id}] {prov_name} returned {e.response.status_code} error: {error_text[:500]}")
+            except Exception as log_err:
+                logger.error(f"[{request_id}] Could not read error response: {log_err}")
+
             # 检查是否是 context length 超限错误 (400)
             if e.response.status_code == 400:
                 try:
@@ -1138,6 +1172,13 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
             logger.debug(f"[{request_id}] ← [{prov_name}] stream completed, step={step_name}")
 
         except HTTPStatusError as e:
+            # 记录详细的错误响应信息
+            try:
+                error_text = e.response.text
+                logger.error(f"[{request_id}] {prov_name} streaming returned {e.response.status_code} error: {error_text[:500]}")
+            except Exception as log_err:
+                logger.error(f"[{request_id}] Could not read streaming error response: {log_err}")
+
             # 检查是否是 context length 超限错误
             if e.response.status_code == 400:
                 try:
@@ -1215,7 +1256,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
             if is_chat:
                 # 闲聊：直接流式调用 chat_intention
                 async for chunk in call_provider_streaming(
-                    workflow_config.chat_intention,
+                    workflow_config.get_chat_intention_single(),
                     body.get("messages", []),
                     "chat_intention"
                 ):
@@ -1243,7 +1284,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
 
                     # Step 2a: analyze_plan - 带 fallback 的非流式调用
                     analyze_resp, _ = await call_provider_with_fallback(
-                        workflow_config.analyze_plan,
+                        workflow_config.get_analyze_plan_list(),
                         msgs,
                         "analyze_plan"
                     )
@@ -1306,7 +1347,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
         # 非流式处理：收集所有结果后返回
         if is_chat:
             resp, _ = await call_provider(
-                workflow_config.chat_intention,
+                workflow_config.get_chat_intention_single(),
                 body.get("messages", []),
                 "chat_intention"
             )
@@ -1320,7 +1361,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
 
                 # Step 2a: analyze_plan
                 analyze_resp, _ = await call_provider_with_fallback(
-                    workflow_config.analyze_plan,
+                    workflow_config.get_analyze_plan_list(),
                     msgs,
                     "analyze_plan"
                 )
