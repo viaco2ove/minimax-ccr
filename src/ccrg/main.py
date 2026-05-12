@@ -794,6 +794,74 @@ def _detect_workflow_intent(body: dict, keywords: dict) -> str:
     return "chat"
 
 
+def _resolve_execute_route(body: dict, request_id: str) -> str:
+    """根据路由规则动态决定 execute_solve 走哪个 provider:model。
+
+    复用标准路由引擎的 scenario/tool_routing/keyword_routing 规则，
+    如果路由引擎能匹配到规则，就用路由结果；否则用 workflow 配置的 execute_solve 兜底。
+    """
+    global _routing_engine, _config
+
+    try:
+        tags = _classify_request(body)
+        route_result = _routing_engine.route(tags)
+        route_str = f"{route_result.provider}:{route_result.model}"
+        logger.info(
+            f"[{request_id}] execute_solve routed to {route_str} "
+            f"via {route_result.matched_rule} ({route_result.matched_reason})"
+        )
+        return route_str
+    except Exception as e:
+        logger.warning(f"[{request_id}] execute_solve routing failed ({e}), using workflow default")
+        return _config.workflow.execute_solve
+
+
+def _is_user_initiated_message(body: dict) -> bool:
+    """判断请求是否由用户主动输入触发（而非工具调用循环的后续请求）。
+
+    Claude Code 的请求模式：
+    - 用户发送新消息：messages 最后一条 user 消息的内容是用户实际输入的文本
+    - 工具调用循环：messages 最后一条 user 消息的内容全是 <system-reminder> 或工具结果
+
+    判断标准：最后一条 user 消息中，如果所有文本块都以 <system-reminder> 开头，
+    则认为是工具循环回调，不是用户主动输入。
+    """
+    messages = body.get("messages", [])
+
+    # 找到最后一条 user 消息
+    last_user_msg = None
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            last_user_msg = msg
+            break
+
+    if not last_user_msg:
+        return False
+
+    content = last_user_msg.get("content", "")
+
+    # 字符串内容：检查是否以 <system-reminder> 开头
+    if isinstance(content, str):
+        stripped = content.strip()
+        if not stripped:
+            return False
+        return not stripped.startswith("<system-reminder>")
+
+    # 列表内容：检查所有 text 块是否都是 system-reminder
+    if isinstance(content, list):
+        text_blocks = [b for b in content if isinstance(b, dict) and b.get("type") == "text"]
+        if not text_blocks:
+            return False
+        # 只要有一个 text 块不是 system-reminder，就认为是用户主动输入
+        for block in text_blocks:
+            text = block.get("text", "").strip()
+            if text and not text.startswith("<system-reminder>"):
+                return True
+        return False
+
+    return False
+
+
 async def _handle_workflow(request: Request, body: dict, request_id: str) -> Response:
     """处理 workflow 请求（多步骤 AI 协作）"""
     workflow_config = _config.workflow
@@ -980,7 +1048,8 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
     # Step 1: Intention Analysis (基于 keywords.json)
     intent = _detect_workflow_intent(body, _config.keywords)
     is_chat = (intent == "chat")
-    logger.info(f"[{request_id}] Workflow intention (keyword-based): {intent}")
+    is_user_initiated = _is_user_initiated_message(body)
+    logger.info(f"[{request_id}] Workflow intention (keyword-based): {intent}, user_initiated={is_user_initiated}")
 
     if is_streaming:
         # 流式处理：每个步骤的结果实时 yield
@@ -994,22 +1063,72 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 ):
                     yield chunk
             else:
-                # 任务：直接调用 execute_solve 模型处理
+                # 任务
                 msgs = body.get("messages", [])
-                first_user = next((m["content"] for m in msgs if m.get("role") == "user"), None)
-                if isinstance(first_user, list):
-                    first_user = next((c["text"] for c in first_user if c.get("type") == "text"), None)
-                if first_user:
-                    preview = str(first_user)[:300].replace("\n", " ")
-                    logger.info(f"[{request_id}] Task → execute_solve (minimax). First user msg: {preview}")
+                last_user_msg = None
+                for msg in reversed(msgs):
+                    if msg.get("role") == "user":
+                        last_user_msg = msg
+                        break
+                last_user_text = ""
+                if last_user_msg:
+                    c = last_user_msg.get("content", "")
+                    if isinstance(c, str):
+                        last_user_text = c
+                    elif isinstance(c, list):
+                        last_user_text = next((b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text"), "")
+                preview = str(last_user_text)[:300].replace("\n", " ") if last_user_text else "(no user msg)"
+
+                if is_user_initiated:
+                    # 用户主动输入的 task → 先 analyze_plan (qianfan)，再 execute_solve (minimax)
+                    logger.info(f"[{request_id}] Task (user-initiated) → analyze_plan then execute_solve. Last user msg: {preview}")
+
+                    # Step 2a: analyze_plan - 非流式调用 qianfan 做分析规划
+                    analyze_resp, _ = await call_provider(
+                        workflow_config.analyze_plan,
+                        msgs,
+                        "analyze_plan"
+                    )
+                    logger.info(f"[{request_id}] analyze_plan completed, proceeding to execute_solve")
+
+                    # Step 2b: execute_solve - 流式调用 minimax 执行
+                    # 将 analyze_plan 的结果注入 messages 作为额外上下文
+                    analyze_text = ""
+                    if isinstance(analyze_resp, dict):
+                        analyze_content = analyze_resp.get("content", [])
+                        if isinstance(analyze_content, list):
+                            analyze_text = "".join(
+                                b.get("text", "") for b in analyze_content
+                                if isinstance(b, dict) and b.get("type") == "text"
+                            )
+                        elif isinstance(analyze_content, str):
+                            analyze_text = analyze_content
+
+                    if analyze_text:
+                        augmented_msgs = list(msgs) + [
+                            {"role": "assistant", "content": f"[analyze_plan] {analyze_text}"},
+                            {"role": "user", "content": "Based on the above analysis, proceed to execute the solution."},
+                        ]
+                    else:
+                        augmented_msgs = msgs
+
+                    execute_route = _resolve_execute_route(body, request_id)
+                    async for chunk in call_provider_streaming(
+                        execute_route,
+                        augmented_msgs,
+                        "execute_solve"
+                    ):
+                        yield chunk
                 else:
-                    logger.info(f"[{request_id}] Task → execute_solve (minimax)")
-                async for chunk in call_provider_streaming(
-                    workflow_config.execute_solve,
-                    body.get("messages", []),
-                    "execute_solve"
-                ):
-                    yield chunk
+                    # 工具循环回调 → 直接 execute_solve，不走 analyze_plan
+                    logger.info(f"[{request_id}] Task (tool-loop) → execute_solve directly. Last user msg: {preview}")
+                    execute_route = _resolve_execute_route(body, request_id)
+                    async for chunk in call_provider_streaming(
+                        execute_route,
+                        body.get("messages", []),
+                        "execute_solve"
+                    ):
+                        yield chunk
 
         return StreamingResponse(workflow_stream_generator(), media_type="text/event-stream")
     else:
@@ -1022,12 +1141,56 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
             )
             return JSONResponse(content=resp)
         else:
-            # 任务：直接调用 execute_solve 模型处理
-            resp, _ = await call_provider(
-                workflow_config.execute_solve,
-                body.get("messages", []),
-                "execute_solve"
-            )
+            msgs = body.get("messages", [])
+
+            if is_user_initiated:
+                # 用户主动输入的 task → 先 analyze_plan (qianfan)，再 execute_solve (minimax)
+                logger.info(f"[{request_id}] Task (user-initiated) → analyze_plan then execute_solve")
+
+                # Step 2a: analyze_plan
+                analyze_resp, _ = await call_provider(
+                    workflow_config.analyze_plan,
+                    msgs,
+                    "analyze_plan"
+                )
+                logger.info(f"[{request_id}] analyze_plan completed, proceeding to execute_solve")
+
+                # Step 2b: execute_solve
+                analyze_text = ""
+                if isinstance(analyze_resp, dict):
+                    analyze_content = analyze_resp.get("content", [])
+                    if isinstance(analyze_content, list):
+                        analyze_text = "".join(
+                            b.get("text", "") for b in analyze_content
+                            if isinstance(b, dict) and b.get("type") == "text"
+                        )
+                    elif isinstance(analyze_content, str):
+                        analyze_text = analyze_content
+
+                if analyze_text:
+                    augmented_msgs = list(msgs) + [
+                        {"role": "assistant", "content": f"[analyze_plan] {analyze_text}"},
+                        {"role": "user", "content": "Based on the above analysis, proceed to execute the solution."},
+                    ]
+                else:
+                    augmented_msgs = msgs
+
+                execute_route = _resolve_execute_route(body, request_id)
+                resp, _ = await call_provider(
+                    execute_route,
+                    augmented_msgs,
+                    "execute_solve"
+                )
+            else:
+                # 工具循环回调 → 直接 execute_solve
+                logger.info(f"[{request_id}] Task (tool-loop) → execute_solve directly")
+                execute_route = _resolve_execute_route(body, request_id)
+                resp, _ = await call_provider(
+                    execute_route,
+                    msgs,
+                    "execute_solve"
+                )
+
             if isinstance(resp, dict):
                 content = resp.get("content", [])
                 if isinstance(content, list):
