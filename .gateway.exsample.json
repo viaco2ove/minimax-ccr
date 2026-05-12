@@ -1,24 +1,65 @@
 {
   "server": {
     "host": "127.0.0.1",
-    "port": 3458,
+    "port": 3428,
     "timeout_ms": 600000,
-    "log_level": "info",
+    "log_level": "debug",
     "log_file": "logs/ccrg.log",
     "proxy_url": "",
-    "api_key": "",
+    "api_key": "xxxx",
     "claude_path": ""
   },
   "providers": {
     "minimax": {
       "api_base_url": "https://api.minimaxi.com/anthropic",
-      "api_key": "your_minimax_api_key_here",
-      "protocol": "anthropic",
+      "api_key": "xxxx",
+      "protocol": "codeplan_anthropic",
       "models": ["MiniMax-M2.7"],
       "capabilities": {
         "tool_use": true,
         "streaming": true,
-        "thinking": false,
+        "thinking": true,
+        "vision": true,
+        "max_context": 128000
+      },
+      "cost_tier": "cheap",
+      "timeout_ms": 1200000,
+      "default_params": {
+        "max_tokens": 4096
+      },
+      "retry": {
+        "max_attempts": 3,
+        "retry_on_status": [429, 500, 502, 503]
+      }
+    },
+    "qianfan": {
+      "api_base_url": "https://qianfan.baidubce.com/anthropic/coding",
+      "api_key": "xxxx",
+      "protocol": "codeplan_anthropic",
+      "models": ["qianfan-code-latest"],
+      "capabilities": {
+        "tool_use": true,
+        "streaming": true,
+        "thinking": true,
+        "vision": false,
+        "max_context": 128000
+      },
+      "cost_tier": "cheap",
+      "timeout_ms": 120000,
+      "retry": {
+        "max_attempts": 3,
+        "retry_on_status": [429, 500, 502, 503]
+      }
+    },
+    "mmx": {
+      "api_base_url": "https://127.0.0.1:3457",
+      "api_key": "xxxx",
+      "protocol": "mmx",
+      "models": ["MiniMax-M2.7"],
+      "capabilities": {
+        "tool_use": true,
+        "streaming": true,
+        "thinking": true,
         "vision": true,
         "max_context": 128000
       },
@@ -31,34 +72,16 @@
         "retry_on_status": [429, 500, 502, 503]
       }
     },
-    "qianfan": {
-      "api_base_url": "https://qianfan.baidubce.com/anthropic/coding",
-      "api_key": "your_qianfan_api_key_here",
-      "protocol": "anthropic",
-      "models": ["qianfan-code-latest"],
-      "capabilities": {
-        "tool_use": true,
-        "streaming": true,
-        "thinking": false,
-        "vision": false,
-        "max_context": 128000
-      },
-      "cost_tier": "cheap",
-      "retry": {
-        "max_attempts": 1,
-        "retry_on_status": [429, 500]
-      }
-    },
     "deepseek": {
       "api_base_url": "https://api.deepseek.com",
-      "api_key": "your_deepseek_api_key_here",
-      "protocol": "openai",
-      "models": ["deepseek-chat", "deepseek-reasoner", "deepseek-v4-pro"],
+      "api_key": "xxxx",
+      "protocol": "chat_openai",
+      "models": ["deepseek-chat", "deepseek-reasoner", "deepseek-v4-pro","deepseek-v4-flash"],
       "capabilities": {
         "tool_use": true,
         "streaming": true,
         "thinking": true,
-        "vision": false,
+        "vision": true,
         "max_context": 64000
       },
       "cost_tier": "premium",
@@ -72,25 +95,29 @@
     "default": "minimax:MiniMax-M2.7",
     "scenarios": {
       "background": {
-        "route": "deepseek:deepseek-chat",
-        "fallback": ["minimax:MiniMax-M2.7"]
+        "route": "minimax:MiniMax-M2.7",
+        "fallback": ["qianfan:qianfan-code-latest"]
       },
       "think": {
-        "route": "deepseek:deepseek-reasoner",
-        "fallback": ["deepseek:deepseek-chat", "minimax:MiniMax-M2.7"]
+        "route": "qianfan:qianfan-code-latest",
+        "fallback": ["qianfan:qianfan-code-latest","minimax:MiniMax-M2.7"]
       },
       "long_context": {
-        "route": "minimax:MiniMax-M2.7",
-        "fallback": ["deepseek:deepseek-chat"],
-        "threshold": 60000
+        "route": "qianfan:qianfan-code-latest",
+        "fallback": ["minimax:MiniMax-M2.7"],
+        "threshold": 100000
       },
       "web_search": {
-        "route": "deepseek:deepseek-v4-pro",
-        "fallback": ["deepseek:deepseek-chat"]
+        "route": "minimax:MiniMax-M2.7",
+        "fallback": ["qianfan:qianfan-code-latest","minimax:MiniMax-M2.7"]
       },
       "image": {
+        "route": "mmx:MiniMax-M2.7",
+        "fallback": ["minimax:MiniMax-M2.7","qianfan:qianfan-code-latest"]
+      },
+      "compact": {
         "route": "minimax:MiniMax-M2.7",
-        "fallback": ["deepseek:deepseek-v4-pro"]
+        "fallback": ["qianfan:qianfan-code-latest"]
       }
     },
     "tool_routing": {
@@ -102,43 +129,36 @@
         ],
         "match_mode": "any",
         "route": "minimax:MiniMax-M2.7",
-        "fallback": ["qianfan:qianfan-code-latest"]
+        "fallback": ["qianfan:qianfan-code-latest","minimax:MiniMax-M2.7"]
       },
       "standard_tasks": {
         "match": ["Edit", "Write", "NotebookEdit"],
         "match_mode": "any",
         "route": "minimax:MiniMax-M2.7",
-        "fallback": ["deepseek:deepseek-chat"]
+        "fallback": ["qianfan:qianfan-code-latest","minimax:MiniMax-M2.7"]
       },
       "complex_tasks": {
         "match": ["Agent", "TaskCreate", "EnterPlanMode"],
         "match_mode": "any",
-        "route": "deepseek:deepseek-v4-pro",
-        "fallback": ["deepseek:deepseek-chat", "minimax:MiniMax-M2.7"]
+        "route": "qianfan:qianfan-code-latest",
+        "fallback": ["minimax:MiniMax-M2.7"]
       }
     },
     "keyword_routing": {
       "rules": [
         {
-          "keywords": ["搜索", "search", "联网", "web search"],
+          "keywords": ["架构", "architecture", "重构", "refactor", "优化", "设计模式", "模块化", "拆分", "合并", "升级", "改造"],
           "match_mode": "any",
           "scope": "user_message",
-          "route": "deepseek:deepseek-v4-pro",
-          "fallback": ["deepseek:deepseek-chat"]
+          "route": "qianfan:qianfan-code-latest",
+          "fallback": ["minimax:MiniMax-M2.7"]
         },
         {
-          "keywords": ["图片", "截图", "image", "screenshot"],
+          "keywords": ["/compact", "compact"],
           "match_mode": "any",
           "scope": "user_message",
           "route": "minimax:MiniMax-M2.7",
-          "fallback": ["deepseek:deepseek-v4-pro"]
-        },
-        {
-          "keywords": ["架构", "architecture", "重构", "refactor"],
-          "match_mode": "any",
-          "scope": "user_message",
-          "route": "deepseek:deepseek-v4-pro",
-          "fallback": ["deepseek:deepseek-chat"]
+          "fallback": ["qianfan:qianfan-code-latest"]
         }
       ]
     },
@@ -149,8 +169,15 @@
       "enabled": true,
       "provider": "minimax",
       "track_usage": true,
-      "fallback_on_exhaust": "deepseek:deepseek-chat",
+      "fallback_on_exhaust": "minimax:MiniMax-M2.7",
       "warning_threshold": 0.2
     }
+  },
+  "workflow": {
+    "enabled": true,
+    "intention_analyze": "minimax:MiniMax-M2.7",
+    "chat_intention": "minimax:MiniMax-M2.7",
+    "analyze_plan": "qianfan:qianfan-code-latest",
+    "execute_solve": "minimax:MiniMax-M2.7"
   }
 }
