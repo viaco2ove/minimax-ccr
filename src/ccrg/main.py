@@ -956,7 +956,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 logger.debug(f"[{request_id}] ← [{prov_name}] completed, step={step_name}")
                 return resp_data, False
         except HTTPStatusError as e:
-            # 检查是否是 context length 超限错误
+            # 检查是否是 context length 超限错误 (400)
             if e.response.status_code == 400:
                 try:
                     err_body = e.response.json()
@@ -992,6 +992,11 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                             "provider_message": err_msg,
                         }
                     }, False
+
+            # 429 Too Many Requests → 视为可 fallback 的错误，返回给 call_provider_with_fallback 重试
+            if e.response.status_code == 429:
+                logger.warning(f"[{request_id}] Workflow {step_name} hit rate limit (429), returning error for fallback")
+                return {"error": {"type": "rate_limit_exceeded", "message": str(e)}}, False
 
             logger.warning(f"[{request_id}] Workflow {step_name} failed: {e}")
             if _usage_stats:
@@ -1128,6 +1133,19 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                         )
                     yield f"data: {json.dumps({'error': {'type': 'context_length_exceeded', 'message': user_msg}}, ensure_ascii=False)}\n\n".encode("utf-8")
                     return
+
+            # 429 Too Many Requests
+            if e.response.status_code == 429:
+                logger.warning(f"[{request_id}] Workflow {step_name} hit rate limit (429)")
+                if _usage_stats:
+                    _usage_stats.record(
+                        provider=prov_name, model=model,
+                        input_tokens=0, output_tokens=0,
+                        latency_ms=(time.time() - start_time) * 1000,
+                        success=False, route_rule=f"workflow.{step_name}",
+                    )
+                yield f"data: {json.dumps({'error': {'type': 'rate_limit_exceeded', 'message': 'Rate limit exceeded, please try again later'}}, ensure_ascii=False)}\n\n".encode("utf-8")
+                return
 
             logger.warning(f"[{request_id}] Workflow {step_name} streaming failed: {e}")
             yield f"data: {json.dumps({'error': {'type': 'workflow_error', 'message': str(e)}}, ensure_ascii=False)}\n\n".encode("utf-8")
@@ -1327,6 +1345,8 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                     logger.info(f"[{request_id}] execute_solve resp preview: {text_preview[:200].replace(chr(10),' ')}")
             if isinstance(resp, dict) and resp.get("error", {}).get("type") == "context_length_exceeded":
                 raise HTTPException(status_code=400, detail=resp)
+            if isinstance(resp, dict) and resp.get("error", {}).get("type") == "rate_limit_exceeded":
+                raise HTTPException(status_code=429, detail=resp)
             return JSONResponse(content=resp)
 
 
