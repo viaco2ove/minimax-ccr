@@ -1,0 +1,176 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 3428,
+    "timeout_ms": 600000,
+    "log_level": "debug",
+    "log_file": "logs/ccrg.log",
+    "proxy_url": "",
+    "api_key": "xxxx",
+    "claude_path": ""
+  },
+  "providers": {
+    "minimax": {
+      "api_base_url": "https://api.minimaxi.com/anthropic",
+      "api_key": "xxxx",
+      "protocol": "codeplan_anthropic",
+      "models": ["MiniMax-M2.7"],
+      "capabilities": {
+        "tool_use": true,
+        "streaming": true,
+        "thinking": false,
+        "vision": true,
+        "max_context": 128000
+      },
+      "cost_tier": "cheap",
+      "timeout_ms": 1200000,
+      "default_params": {
+        "max_tokens": 4096
+      },
+      "retry": {
+        "max_attempts": 3,
+        "retry_on_status": [429, 500, 502, 503]
+      }
+    },
+    "qianfan": {
+      "api_base_url": "https://qianfan.baidubce.com/anthropic/coding",
+      "api_key": "xxxx",
+      "protocol": "codeplan_anthropic",
+      "models": ["qianfan-code-latest"],
+      "capabilities": {
+        "tool_use": true,
+        "streaming": true,
+        "thinking": false,
+        "vision": false,
+        "max_context": 128000
+      },
+      "cost_tier": "cheap",
+      "timeout_ms": 800000,
+      "retry": {
+        "max_attempts": 2,
+        "retry_on_status": [429, 500, 502, 503]
+      }
+    },
+    "mmx": {
+      "api_base_url": "https://127.0.0.1:3457",
+      "api_key": "xxxx",
+      "protocol": "mmx",
+      "models": ["MiniMax-M2.7"],
+      "capabilities": {
+        "tool_use": true,
+        "streaming": true,
+        "thinking": false,
+        "vision": true,
+        "max_context": 128000
+      },
+      "cost_tier": "cheap",
+      "default_params": {
+        "max_tokens": 4096
+      },
+      "retry": {
+        "max_attempts": 2,
+        "retry_on_status": [429, 500, 502, 503]
+      }
+    },
+    "deepseek": {
+      "api_base_url": "https://api.deepseek.com",
+      "api_key": "xxxx",
+      "protocol": "chat_openai",
+      "models": ["deepseek-chat", "deepseek-reasoner", "deepseek-v4-pro","deepseek-v4-flash"],
+      "capabilities": {
+        "tool_use": true,
+        "streaming": true,
+        "thinking": true,
+        "vision": false,
+        "max_context": 64000
+      },
+      "cost_tier": "premium",
+      "retry": {
+        "max_attempts": 2,
+        "retry_on_status": [429, 500, 502, 503]
+      }
+    }
+  },
+  "routing": {
+    "default": "minimax:MiniMax-M2.7",
+    "scenarios": {
+      "background": {
+        "route": "minimax:MiniMax-M2.7",
+        "fallback": ["qianfan:qianfan-code-latest"]
+      },
+      "think": {
+        "route": "qianfan:qianfan-code-latest",
+        "fallback": ["qianfan:qianfan-code-latest","minimax:MiniMax-M2.7"]
+      },
+      "long_context": {
+        "route": "qianfan:qianfan-code-latest",
+        "fallback": ["minimax:MiniMax-M2.7"],
+        "threshold": 80000
+      },
+      "web_search": {
+        "route": "minimax:MiniMax-M2.7",
+        "fallback": ["qianfan:qianfan-code-latest","minimax:MiniMax-M2.7"]
+      },
+      "image": {
+        "route": "mmx:MiniMax-M2.7",
+        "fallback": ["minimax:MiniMax-M2.7","qianfan:qianfan-code-latest"]
+      },
+      "compact": {
+        "route": "minimax:MiniMax-M2.7",
+        "fallback": ["qianfan:qianfan-code-latest"]
+      }
+    },
+    "tool_routing": {
+      "cheap_tasks": {
+        "match": [
+          "Read", "Glob", "Grep",
+          "Bash(git status)", "Bash(git diff)", "Bash(git log)",
+          "Bash(ls *)", "Bash(cat *)", "Bash(head *)"
+        ],
+        "match_mode": "any",
+        "route": "minimax:MiniMax-M2.7",
+        "fallback": ["qianfan:qianfan-code-latest","minimax:MiniMax-M2.7"]
+      },
+      "standard_tasks": {
+        "match": ["Edit", "Write", "NotebookEdit"],
+        "match_mode": "any",
+        "route": "minimax:MiniMax-M2.7",
+        "fallback": ["qianfan:qianfan-code-latest","minimax:MiniMax-M2.7"]
+      },
+      "complex_tasks": {
+        "match": ["Agent", "TaskCreate", "EnterPlanMode"],
+        "match_mode": "any",
+        "route": "qianfan:qianfan-code-latest",
+        "fallback": ["minimax:MiniMax-M2.7"]
+      }
+    },
+    "keyword_routing": {
+      "rules": [
+        {
+          "keywords": ["架构", "architecture", "重构", "refactor"],
+          "match_mode": "any",
+          "scope": "user_message",
+          "route": "qianfan:qianfan-code-latest",
+          "fallback": ["minimax:MiniMax-M2.7"]
+        },
+        {
+          "keywords": ["/compact", "compact"],
+          "match_mode": "any",
+          "scope": "user_message",
+          "route": "minimax:MiniMax-M2.7",
+          "fallback": ["qianfan:qianfan-code-latest"]
+        }
+      ]
+    },
+    "priority": ["scenario", "tool_routing", "keyword_routing", "default"]
+  },
+  "quota": {
+    "minimax_codeplan": {
+      "enabled": true,
+      "provider": "minimax",
+      "track_usage": true,
+      "fallback_on_exhaust": "minimax:MiniMax-M2.7",
+      "warning_threshold": 0.2
+    }
+  }
+}

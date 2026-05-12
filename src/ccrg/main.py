@@ -224,6 +224,11 @@ def init_app(config_path: str | None = None) -> FastAPI:
     _routing_engine = RoutingEngine(_config)
     _usage_stats = get_usage_stats(_config)
 
+    # 设置日志级别
+    log_level_str = _config.server.get("log_level", "info").upper()
+    log_level = getattr(logging, log_level_str, logging.INFO)
+    logging.getLogger("ccrg").setLevel(log_level)
+
     app = FastAPI(title="Claude Code Router Gateway")
 
     @app.post("/v1/messages")
@@ -234,6 +239,11 @@ def init_app(config_path: str | None = None) -> FastAPI:
     async def health():
         providers = list(_config.providers.keys()) if _config else []
         return {"status": "ok", "providers": providers}
+
+    @app.post("/v1/messages/count_tokens")
+    async def count_tokens(request: Request):
+        """Count tokens endpoint - not implemented, returns 404 to allow client fallback"""
+        return JSONResponse(status_code=404, content={"error": {"type": "not_implemented", "message": "count_tokens is not supported"}})
 
     @app.get("/stats")
     async def stats(range: str = "today", start: str | None = None, end: str | None = None):
@@ -297,7 +307,7 @@ async def _handle_request(request: Request) -> Response:
         )
         return error_resp
 
-    logger.info(f"[{request_id}] Received request: model={body.get('model')}, stream={body.get('stream')}")
+    logger.debug(f"[{request_id}] Received request: {json.dumps(body, ensure_ascii=False)[:2000]}")
 
     # 1. 分类请求
     tags = _classify_request(body)

@@ -19,6 +19,10 @@ class ScenarioClassifier:
         routing_config = config.get("routing", {})
         scenarios_config = routing_config.get("scenarios", {})
 
+        # 0. compact 场景（优先级最高）
+        if self._has_compact(request):
+            return "compact"
+
         # 1. thinking 场景
         if request.get("thinking"):
             return "think"
@@ -43,6 +47,20 @@ class ScenarioClassifier:
             return "long_context"
 
         return None
+
+    def _has_compact(self, request: dict) -> bool:
+        """检查是否包含 /compact 命令"""
+        for msg in request.get("messages", []):
+            content = msg.get("content", "")
+            if isinstance(content, str) and "/compact" in content:
+                return True
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text = block.get("text", "")
+                        if "/compact" in text:
+                            return True
+        return False
 
     def _has_web_search(self, request: dict) -> bool:
         """检查是否包含 web_search tools"""
