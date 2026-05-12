@@ -2,7 +2,6 @@
 __pycache__/
 *.pyc
 .env.local
-logs/*.log
-!.gitkeep
+logs/
 .idea/
 /.mmx.env
