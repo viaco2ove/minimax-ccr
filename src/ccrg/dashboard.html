@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CCRG Dashboard</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh}
+  .header{background:linear-gradient(135deg,#1e293b,#0f172a);padding:20px 32px;border-bottom:1px solid #334155;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px}
+  .header h1{font-size:22px;font-weight:600;color:#f1f5f9}
+  .header-right{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .badge{background:#334155;color:#94a3b8;padding:4px 10px;border-radius:12px;font-size:11px}
+  .container{max-width:1200px;margin:0 auto;padding:24px}
+  .filter-bar{display:flex;align-items:center;gap:8px;margin-bottom:20px;flex-wrap:wrap}
+  .filter-btn{background:#1e293b;color:#94a3b8;border:1px solid #334155;padding:7px 16px;border-radius:8px;cursor:pointer;font-size:13px;transition:all .15s}
+  .filter-btn:hover{background:#334155;color:#e2e8f0}
+  .filter-btn.active{background:#3b82f6;color:#fff;border-color:#3b82f6}
+  .filter-sep{width:1px;height:24px;background:#334155;margin:0 4px}
+  .custom-range{display:flex;align-items:center;gap:6px;font-size:13px;color:#94a3b8}
+  .custom-range input[type="datetime-local"]{background:#1e293b;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:5px 8px;font-size:12px;outline:none}
+  .custom-range input[type="datetime-local"]:focus{border-color:#3b82f6}
+  .custom-range button{background:#8b5cf6;color:#fff;border:none;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:12px}
+  .custom-range button:hover{background:#7c3aed}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:24px}
+  .card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:18px 20px}
+  .card .label{font-size:12px;color:#94a3b8;margin-bottom:4px}
+  .card .value{font-size:26px;font-weight:700;color:#f1f5f9}
+  .card .sub{font-size:11px;color:#64748b;margin-top:4px}
+  .section{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:20px;margin-bottom:24px}
+  .section h2{font-size:15px;font-weight:600;margin-bottom:14px;color:#e2e8f0}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;padding:10px 12px;color:#94a3b8;font-weight:500;border-bottom:1px solid #334155;font-size:12px;text-transform:uppercase;letter-spacing:.3px}
+  td{padding:10px 12px;border-bottom:1px solid #1e293b}
+  tr:hover td{background:#0f172a}
+  .tag{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:500}
+  .tag-green{background:#064e3b;color:#6ee7b7}
+  .tag-red{background:#450a0a;color:#fca5a5}
+  .tag-blue{background:#1e3a5f;color:#93c5fd}
+  .bar{height:6px;border-radius:3px;background:#334155;overflow:hidden;margin-top:4px}
+  .bar-fill{height:100%;border-radius:3px;transition:width .6s ease}
+  .empty{text-align:center;color:#64748b;padding:40px;font-size:14px}
+  .range-label{font-size:12px;color:#64748b;margin-bottom:16px}
+  #custom-fields{display:none}
+  #custom-fields.show{display:flex}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>CCRG Dashboard</h1>
+  <div class="header-right">
+    <span class="badge" id="auto-badge">Auto 30s</span>
+  </div>
+</div>
+<div class="container">
+  <div class="filter-bar">
+    <button class="filter-btn" data-range="1h" onclick="setRange('1h')">最近1小时</button>
+    <button class="filter-btn active" data-range="today" onclick="setRange('today')">今天</button>
+    <button class="filter-btn" data-range="month" onclick="setRange('month')">本月</button>
+    <button class="filter-btn" data-range="year" onclick="setRange('year')">今年</button>
+    <div class="filter-sep"></div>
+    <button class="filter-btn" data-range="custom" onclick="setRange('custom')">自定义</button>
+    <div id="custom-fields" class="custom-range">
+      <input type="datetime-local" id="start-dt">
+      <span>~</span>
+      <input type="datetime-local" id="end-dt">
+      <button onclick="applyCustom()">查询</button>
+    </div>
+  </div>
+  <div class="range-label" id="range-label"></div>
+  <div class="cards" id="range-cards"></div>
+  <div class="section">
+    <h2>各 Provider 用量明细</h2>
+    <div id="range-table"></div>
+  </div>
+  <div class="section">
+    <h2>历史累计</h2>
+    <div id="summary-table"></div>
+  </div>
+</div>
+<script>
+const COLORS = ["#3b82f6", "#8b5cf6", "#ec4899", "#f59e0b", "#10b981", "#ef4444"];
+const RANGE_LABELS = {"1h": "最近1小时", "today": "今天", "month": "本月", "year": "今年", "custom": "自定义"};
+let curRange = "today", curStart = null, curEnd = null;
+
+function fmt(n) { return n == null ? "-" : n.toLocaleString(); }
+function fmtT(n) { if (n == null) return "-"; if (n >= 1e6) return (n / 1e6).toFixed(1) + "M"; if (n >= 1e3) return (n / 1e3).toFixed(1) + "K"; return n.toString(); }
+function fmtMs(ms) { if (!ms) return "-"; return ms < 1000 ? Math.round(ms) + "ms" : (ms / 1000).toFixed(1) + "s"; }
+function sTag(s, f) {
+  if (s + f === 0) return "<span class=\"tag tag-blue\">-</span>";
+  const r = s / (s + f);
+  return r >= 0.9
+    ? "<span class=\"tag tag-green\">" + s + "/" + (s + f) + "</span>"
+    : "<span class=\"tag tag-red\">" + s + "/" + (s + f) + "</span>";
+}
+function barH(pct, c) {
+  return "<div class=\"bar\"><div class=\"bar-fill\" style=\"width:" + Math.min(pct, 100) + "%;background:" + c + "\"></div></div>";
+}
+
+function setRange(r) {
+  curRange = r;
+  document.querySelectorAll(".filter-btn").forEach(function(b) { b.classList.toggle("active", b.dataset.range === r); });
+  const cf = document.getElementById("custom-fields");
+  if (r === "custom") { cf.classList.add("show"); return; }
+  cf.classList.remove("show");
+  loadStats();
+}
+
+function applyCustom() {
+  const s = document.getElementById("start-dt").value;
+  const e = document.getElementById("end-dt").value;
+  if (!s || !e) return;
+  curStart = new Date(s).toISOString();
+  curEnd = new Date(e).toISOString();
+  loadStats();
+}
+
+function toLocal(dt) {
+  const d = new Date(dt);
+  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0")
+    + " " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+}
+
+function renderRangeCards(data) {
+  const el = document.getElementById("range-cards");
+  let tReq = 0, tIn = 0, tOut = 0, tTok = 0, tOk = 0, tFail = 0;
+  Object.values(data).forEach(function(d) {
+    tReq += d.request_count;
+    tIn += d.input_tokens;
+    tOut += d.output_tokens;
+    tTok += d.total_tokens;
+    tOk += d.success_count;
+    tFail += d.fail_count;
+  });
+  el.innerHTML = "\
+    <div class=\"card\"><div class=\"label\">请求数</div><div class=\"value\">" + fmt(tReq) + "</div><div class=\"sub\">" + sTag(tOk, tFail) + "</div></div>\
+    <div class=\"card\"><div class=\"label\">输入 Tokens</div><div class=\"value\" style=\"color:#60a5fa\">" + fmtT(tIn) + "</div></div>\
+    <div class=\"card\"><div class=\"label\">输出 Tokens</div><div class=\"value\" style=\"color:#fbbf24\">" + fmtT(tOut) + "</div></div>\
+    <div class=\"card\"><div class=\"label\">总计 Tokens</div><div class=\"value\" style=\"color:#c084fc\">" + fmtT(tTok) + "</div><div class=\"sub\">" + fmt(tTok) + " tokens</div></div>";
+}
+
+function renderRangeTable(data) {
+  const el = document.getElementById("range-table");
+  const entries = Object.entries(data || {});
+  if (!entries.length) { el.innerHTML = "<div class=\"empty\">该时间段暂无数据</div>"; return; }
+  let mx = 0;
+  entries.forEach(function(_, d) { if (d.total_tokens > mx) mx = d.total_tokens; });
+  let h = "<table><tr><th>Provider</th><th>Models</th><th>请求数</th><th>成功/失败</th><th>输入</th><th>输出</th><th>总计 Tokens</th><th>平均延迟</th></tr>";
+  entries.forEach(function(entry, i) {
+    const name = entry[0], d = entry[1];
+    const c = COLORS[i % COLORS.length];
+    h += "<tr>\
+      <td style=\"font-weight:600;color:" + c + "\">" + name + "</td>\
+      <td style=\"font-size:11px;color:#94a3b8\">" + (d.models || []).join(", ") + "</td>\
+      <td>" + fmt(d.request_count) + "</td>\
+      <td>" + sTag(d.success_count, d.fail_count) + "</td>\
+      <td>" + fmtT(d.input_tokens) + "</td>\
+      <td>" + fmtT(d.output_tokens) + "</td>\
+      <td>" + fmtT(d.total_tokens) + barH(mx ? d.total_tokens / mx * 100 : 0, c) + "</td>\
+      <td>" + fmtMs(d.avg_latency_ms) + "</td>\
+    </tr>";
+  });
+  h += "</table>";
+  el.innerHTML = h;
+}
+
+function renderSummaryTable(summary) {
+  const el = document.getElementById("summary-table");
+  const entries = Object.entries(summary.providers || {});
+  if (!entries.length) { el.innerHTML = "<div class=\"empty\">暂无历史数据</div>"; return; }
+  let mx = 0;
+  entries.forEach(function(_, d) { if (d.total_tokens > mx) mx = d.total_tokens; });
+  let h = "<table><tr><th>Provider</th><th>总请求数</th><th>总 Tokens</th></tr>";
+  entries.forEach(function(entry, i) {
+    const name = entry[0], d = entry[1];
+    const c = COLORS[i % COLORS.length];
+    h += "<tr>\
+      <td style=\"font-weight:600;color:" + c + "\">" + name + "</td>\
+      <td>" + fmt(d.total_requests) + "</td>\
+      <td>" + fmtT(d.total_tokens) + barH(mx ? d.total_tokens / mx * 100 : 0, c) + "</td>\
+    </tr>";
+  });
+  h += "</table>";
+  el.innerHTML = h;
+}
+
+async function loadStats() {
+  let url = "/stats?range=" + curRange;
+  if (curRange === "custom" && curStart && curEnd)
+    url += "&start=" + encodeURIComponent(curStart) + "&end=" + encodeURIComponent(curEnd);
+  try {
+    const resp = await fetch(url);
+    const data = await resp.json();
+    const rl = document.getElementById("range-label");
+    rl.textContent = RANGE_LABELS[curRange] || curRange;
+    if (curRange === "custom" && curStart && curEnd)
+      rl.textContent += " (" + toLocal(curStart) + " ~ " + toLocal(curEnd) + ")";
+    renderRangeCards(data.range || {});
+    renderRangeTable(data.range || {});
+    renderSummaryTable(data.summary || {});
+  } catch (e) {
+    console.error("Failed:", e);
+  }
+}
+
+loadStats();
+setInterval(loadStats, 30000);
+</script>
+</body>
+</html>

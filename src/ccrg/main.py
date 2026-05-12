@@ -276,8 +276,9 @@ def init_app(config_path: str | None = None) -> FastAPI:
 
     @app.get("/dashboard")
     async def dashboard():
-        """Token 使用可视化面板"""
-        return HTMLResponse(content=_DASHBOARD_HTML)
+        """Token 使用可视化面板 — 从独立 HTML 文件加载，修改后刷新即可生效"""
+        dashboard_path = Path(__file__).parent / "dashboard.html"
+        return HTMLResponse(content=dashboard_path.read_text(encoding="utf-8"))
 
     @app.get("/")
     async def root():
@@ -858,88 +859,117 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 )
             return {"error": {"type": "workflow_error", "message": str(e)}}, False
 
+    async def call_provider_streaming(route_str: str, messages: list, step_name: str) -> AsyncGenerator[bytes, None]:
+        """流式调用 provider，实时 yield 每个 chunk"""
+        prov_name, model = parse_provider_model(route_str)
+        prov_config = _registry.get(prov_name)
+        if not prov_config:
+            yield f"data: {json.dumps({'error': {'type': 'provider_error', 'message': f'Unknown provider: {prov_name}'}}, ensure_ascii=False)}\n\n".encode("utf-8")
+            return
+
+        prov_adapter = _get_adapter_for_provider(prov_name)
+
+        # 构建请求
+        req_body = dict(body)
+        req_body["messages"] = messages
+        req_body["model"] = model
+        req_body["stream"] = True
+
+        req_for_provider = prov_adapter.transform_request(req_body, _provider_config_to_dict(prov_config))
+        req_for_provider["model"] = model
+
+        prov_target_url = prov_adapter.get_target_url(_provider_config_to_dict(prov_config), model)
+        if not prov_target_url.startswith("http"):
+            prov_target_url = f"http://{prov_target_url}"
+
+        prov_headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {prov_config.api_key}",
+        }
+
+        prov_timeout = (prov_config.timeout_ms or _config.server.get("timeout_ms", 600000)) / 1000
+
+        logger.info(f"[{request_id}] Workflow {step_name} streaming: {prov_name} at {prov_target_url}")
+
+        try:
+            async with httpx.AsyncClient(timeout=prov_timeout) as client:
+                async with client.stream("POST", prov_target_url, json=req_for_provider, headers=prov_headers) as response:
+                    response.raise_for_status()
+
+                    # 根据 provider 类型选择 converter
+                    converter = None
+                    if prov_config.protocol == "chat_openai":
+                        from .protocol.openai_sse import OpenAISSEConverter
+                        converter = OpenAISSEConverter(model)
+
+                    async for line in response.aiter_lines():
+                        line = line.strip()
+                        if not line:
+                            continue
+
+                        # 如果是 SSE 格式 data: 开头
+                        if line.startswith("data: "):
+                            data_content = line[6:]  # 去掉 "data: " 前缀
+                            if data_content == "[DONE]":
+                                break
+
+                            # 如果有 converter，转换格式
+                            if converter:
+                                raw_chunk = line.encode("utf-8")
+                                events = converter.convert_chunk(raw_chunk)
+                                for event in events:
+                                    yield event
+                            else:
+                                # 直接 yield 原始数据
+                                yield f"{line}\n".encode("utf-8")
+                        else:
+                            # 非 SSE 格式，直接 yield
+                            yield f"{line}\n".encode("utf-8")
+
+            # 记录成功
+            if _usage_stats:
+                _usage_stats.record(
+                    provider=prov_name, model=model,
+                    input_tokens=0, output_tokens=0,
+                    latency_ms=(time.time() - start_time) * 1000,
+                    success=True, route_rule=f"workflow.{step_name}",
+                )
+
+        except Exception as e:
+            logger.warning(f"[{request_id}] Workflow {step_name} streaming failed: {e}")
+            yield f"data: {json.dumps({'error': {'type': 'workflow_error', 'message': str(e)}}, ensure_ascii=False)}\n\n".encode("utf-8")
+            if _usage_stats:
+                _usage_stats.record(
+                    provider=prov_name, model=model,
+                    input_tokens=0, output_tokens=0,
+                    latency_ms=(time.time() - start_time) * 1000,
+                    success=False, route_rule=f"workflow.{step_name}",
+                )
+
     # Step 1: Intention Analysis (基于 keywords.json)
     intent = _detect_workflow_intent(body, _config.keywords)
     is_chat = (intent == "chat")
     logger.info(f"[{request_id}] Workflow intention (keyword-based): {intent}")
 
     if is_streaming:
-        # 流式处理：每个步骤的结果直接 yield
-        from .protocol.openai_sse import OpenAISSEConverter
-
+        # 流式处理：每个步骤的结果实时 yield
         async def workflow_stream_generator() -> AsyncGenerator[bytes, None]:
             if is_chat:
-                # 闲聊：直接调用 chat_intention
-                resp, _ = await call_provider(
+                # 闲聊：直接流式调用 chat_intention
+                async for chunk in call_provider_streaming(
                     workflow_config.chat_intention,
                     body.get("messages", []),
                     "chat_intention"
-                )
-                if "error" in resp:
-                    yield f"data: {json.dumps(resp, ensure_ascii=False)}\n\n".encode("utf-8")
-                else:
-                    # 简单流式返回
-                    if isinstance(resp, dict) and resp.get("content"):
-                        yield f"data: {json.dumps(resp, ensure_ascii=False)}\n\n".encode("utf-8")
+                ):
+                    yield chunk
             else:
-                # 任务：problem_analyze → solution_plan → execute_solve
-
-                # Step 2: Problem Analyze
-                analysis_prompt = "请分析这个问题，详细说明问题的本质和关键点。"
-                analysis_messages = [
-                    *body.get("messages", []),
-                    {"role": "user", "content": analysis_prompt}
-                ]
-                resp, _ = await call_provider(workflow_config.problem_analyze, analysis_messages, "problem_analyze")
-                if "error" not in resp:
-                    yield f"data: {json.dumps(resp, ensure_ascii=False)}\n\n".encode("utf-8")
-
-                # Step 3: Solution Plan
-                plan_prompt = "请基于以上分析，制定解决方案。"
-                plan_messages = [
-                    *body.get("messages", []),
-                    {"role": "user", "content": analysis_prompt}
-                ]
-                # 添加分析结果
-                analysis_content = ""
-                if isinstance(resp, dict):
-                    content = resp.get("content", [])
-                    if isinstance(content, list):
-                        for block in content:
-                            if isinstance(block, dict) and block.get("type") == "text":
-                                analysis_content = block.get("text", "")
-                                break
-                plan_messages.append({"role": "assistant", "content": analysis_content})
-                plan_messages.append({"role": "user", "content": plan_prompt})
-
-                resp, _ = await call_provider(workflow_config.solution_plan, plan_messages, "solution_plan")
-                if "error" not in resp:
-                    yield f"data: {json.dumps(resp, ensure_ascii=False)}\n\n".encode("utf-8")
-
-                # Step 4: Execute Solve
-                execute_prompt = "请执行以上解决方案。"
-                execute_messages = [
-                    *body.get("messages", []),
-                    {"role": "user", "content": analysis_prompt}
-                ]
-                execute_messages.append({"role": "assistant", "content": analysis_content})
-
-                plan_content = ""
-                if isinstance(resp, dict):
-                    content = resp.get("content", [])
-                    if isinstance(content, list):
-                        for block in content:
-                            if isinstance(block, dict) and block.get("type") == "text":
-                                plan_content = block.get("text", "")
-                                break
-                execute_messages.append({"role": "assistant", "content": plan_content})
-                execute_messages.append({"role": "user", "content": execute_prompt})
-
-                resp, _ = await call_provider(workflow_config.execute_solve, execute_messages, "execute_solve")
-                if "error" in resp:
-                    yield f"data: {json.dumps(resp, ensure_ascii=False)}\n\n".encode("utf-8")
-                else:
-                    yield f"data: {json.dumps(resp, ensure_ascii=False)}\n\n".encode("utf-8")
+                # 任务：直接调用 execute_solve 模型处理
+                async for chunk in call_provider_streaming(
+                    workflow_config.execute_solve,
+                    body.get("messages", []),
+                    "execute_solve"
+                ):
+                    yield chunk
 
         return StreamingResponse(workflow_stream_generator(), media_type="text/event-stream")
     else:
@@ -952,54 +982,12 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
             )
             return JSONResponse(content=resp)
         else:
-            # 任务处理流程
-            # Step 2: Problem Analyze
-            analysis_prompt = "请分析这个问题，详细说明问题的本质和关键点。"
-            analysis_messages = [
-                *body.get("messages", []),
-                {"role": "user", "content": analysis_prompt}
-            ]
-            analysis_resp, _ = await call_provider(workflow_config.problem_analyze, analysis_messages, "problem_analyze")
-
-            # Step 3: Solution Plan
-            plan_prompt = "请基于以上分析，制定解决方案。"
-            plan_messages = [
-                *body.get("messages", []),
-                {"role": "user", "content": analysis_prompt}
-            ]
-            analysis_content = ""
-            if isinstance(analysis_resp, dict):
-                content = analysis_resp.get("content", [])
-                if isinstance(content, list):
-                    for block in content:
-                        if isinstance(block, dict) and block.get("type") == "text":
-                            analysis_content = block.get("text", "")
-                            break
-            plan_messages.append({"role": "assistant", "content": analysis_content})
-            plan_messages.append({"role": "user", "content": plan_prompt})
-
-            plan_resp, _ = await call_provider(workflow_config.solution_plan, plan_messages, "solution_plan")
-
-            # Step 4: Execute Solve
-            execute_prompt = "请执行以上解决方案。"
-            execute_messages = [
-                *body.get("messages", []),
-                {"role": "user", "content": analysis_prompt}
-            ]
-            execute_messages.append({"role": "assistant", "content": analysis_content})
-
-            plan_content = ""
-            if isinstance(plan_resp, dict):
-                content = plan_resp.get("content", [])
-                if isinstance(content, list):
-                    for block in content:
-                        if isinstance(block, dict) and block.get("type") == "text":
-                            plan_content = block.get("text", "")
-                            break
-            execute_messages.append({"role": "assistant", "content": plan_content})
-            execute_messages.append({"role": "user", "content": execute_prompt})
-
-            resp, _ = await call_provider(workflow_config.execute_solve, execute_messages, "execute_solve")
+            # 任务：直接调用 execute_solve 模型处理
+            resp, _ = await call_provider(
+                workflow_config.execute_solve,
+                body.get("messages", []),
+                "execute_solve"
+            )
             return JSONResponse(content=resp)
 
 
@@ -1013,7 +1001,7 @@ def run(host: str | None = None, port: int | None = None, config_path: str | Non
     port = port or (_config.server.get("port", 3458) if _config else 3458)
 
     logger.info(f"Starting CCRG on {host}:{port}")
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    uvicorn.run(app, host=host, port=port, log_level="info", timeout_graceful_shutdown=5)
 
 
 if __name__ == "__main__":
