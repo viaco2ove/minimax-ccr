@@ -177,8 +177,7 @@
     "enabled": true,
     "intention_analyze": "minimax:MiniMax-M2.7",
     "chat_intention": "minimax:MiniMax-M2.7",
-    "problem_analyze": "qianfan:qianfan-code-latest",
-    "solution_plan": "qianfan:qianfan-code-latest",
+    "analyze_plan": "qianfan:qianfan-code-latest",
     "execute_solve": "minimax:MiniMax-M2.7"
   }
 }
