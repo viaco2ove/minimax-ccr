@@ -228,6 +228,16 @@ def init_app(config_path: str | None = None) -> FastAPI:
     log_level_str = _config.server.get("log_level", "info").upper()
     log_level = getattr(logging, log_level_str, logging.INFO)
     logging.getLogger("ccrg").setLevel(log_level)
+    # Also set handler level so DEBUG actually reaches the FileHandler
+    _ccrg_logger = logging.getLogger("ccrg")
+    if _ccrg_logger.handlers:
+        for h in _ccrg_logger.handlers:
+            h.setLevel(log_level)
+    else:
+        # Inherited handlers from root — set their level too
+        _root = logging.getLogger()
+        for h in _root.handlers:
+            h.setLevel(log_level)
 
     app = FastAPI(title="Claude Code Router Gateway")
 
@@ -828,6 +838,12 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
 
         prov_timeout = (prov_config.timeout_ms or _config.server.get("timeout_ms", 600000)) / 1000
 
+        # Debug: log request details
+        first_user = next((m["content"] for m in messages if m.get("role") == "user"), None)
+        if isinstance(first_user, list):
+            first_user = next((c["text"] for c in first_user if c.get("type") == "text"), None)
+        preview = str(first_user)[:250].replace("\n", " ") if first_user else "(no user msg)"
+        logger.debug(f"[{request_id}] → [{prov_name}] req: model={model}, stream=False, first_user={preview}")
         logger.info(f"[{request_id}] Workflow {step_name}: calling {prov_name} at {prov_target_url}")
 
         try:
@@ -847,6 +863,13 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                         success=True, route_rule=f"workflow.{step_name}",
                     )
 
+                # Debug: log response preview
+                if isinstance(resp_data, dict):
+                    content = resp_data.get("content", [])
+                    if isinstance(content, list):
+                        text_preview = "".join(b.get("text","") for b in content if isinstance(b,dict) and b.get("type")=="text")[:300]
+                        logger.debug(f"[{request_id}] ← [{prov_name}] resp: step={step_name}, preview={text_preview[:200].replace(chr(10),' ')}")
+                logger.debug(f"[{request_id}] ← [{prov_name}] completed, step={step_name}")
                 return resp_data, False
         except Exception as e:
             logger.warning(f"[{request_id}] Workflow {step_name} failed: {e}")
