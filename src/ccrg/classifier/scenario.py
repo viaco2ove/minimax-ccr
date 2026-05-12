@@ -49,17 +49,22 @@ class ScenarioClassifier:
         return None
 
     def _has_compact(self, request: dict) -> bool:
-        """检查是否包含 /compact 命令"""
-        for msg in request.get("messages", []):
+        """检查是否包含 /compact 命令（仅检查最后一条 user 消息，避免历史消息干扰）"""
+        messages = request.get("messages", [])
+        # 只检查最后一条 user 消息，避免历史消息中的 /compact 影响后续请求
+        for msg in reversed(messages):
+            if msg.get("role") != "user":
+                continue
             content = msg.get("content", "")
-            if isinstance(content, str) and "/compact" in content:
-                return True
+            if isinstance(content, str):
+                if "/compact" in content:
+                    return True
             elif isinstance(content, list):
                 for block in content:
                     if isinstance(block, dict) and block.get("type") == "text":
-                        text = block.get("text", "")
-                        if "/compact" in text:
+                        if "/compact" in block.get("text", ""):
                             return True
+            break  # 只检查最后一条 user 消息
         return False
 
     def _has_web_search(self, request: dict) -> bool:
