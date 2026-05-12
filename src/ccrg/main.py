@@ -309,6 +309,10 @@ async def _handle_request(request: Request) -> Response:
 
     logger.debug(f"[{request_id}] Received request: {json.dumps(body, ensure_ascii=False)[:2000]}")
 
+    # 0. 检查是否启用 workflow
+    if _config.workflow.enabled:
+        return await _handle_workflow(request, body, request_id)
+
     # 1. 分类请求
     tags = _classify_request(body)
 
@@ -744,6 +748,263 @@ def _classify_request(request: dict) -> RequestTags:
     tags.keywords = keyword_classifier.extract_tags(request, keyword_rules)
 
     return tags
+
+
+def _detect_workflow_intent(body: dict, keywords: dict) -> str:
+    """基于 keywords.json 检测工作流意图：chat 或 task"""
+    workflow_keywords = keywords.get("workflow_intent", {})
+    chat_keywords = workflow_keywords.get("chat_intention", [])
+    task_keywords = workflow_keywords.get("intention_analyze", [])
+
+    # 收集用户消息文本
+    user_texts = []
+    for msg in body.get("messages", []):
+        role = msg.get("role", "")
+        if role != "user":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            user_texts.append(content)
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    user_texts.append(block.get("text", ""))
+
+    user_text = " ".join(user_texts).lower()
+
+    # 计算命中
+    chat_score = sum(1 for kw in chat_keywords if kw.lower() in user_text)
+    task_score = sum(1 for kw in task_keywords if kw.lower() in user_text)
+
+    logger.debug(f"Workflow intent detection: chat={chat_score}, task={task_score}")
+
+    if task_score > chat_score:
+        return "task"
+    return "chat"
+
+
+async def _handle_workflow(request: Request, body: dict, request_id: str) -> Response:
+    """处理 workflow 请求（多步骤 AI 协作）"""
+    workflow_config = _config.workflow
+    start_time = time.time()
+    is_streaming = body.get("stream", False)
+
+    def parse_provider_model(route_str: str) -> tuple[str, str]:
+        """解析 provider:model 字符串"""
+        if ":" not in route_str:
+            return route_str, ""
+        return route_str.split(":", 1)
+
+    def build_workflow_message(messages: list, role: str, content: str) -> dict:
+        """构建 workflow 消息"""
+        return {"role": role, "content": content}
+
+    async def call_provider(route_str: str, messages: list, step_name: str) -> tuple[dict, bool]:
+        """调用单个 provider，返回 (response_data, is_streaming)"""
+        prov_name, model = parse_provider_model(route_str)
+        prov_config = _registry.get(prov_name)
+        if not prov_config:
+            return {"error": {"type": "provider_error", "message": f"Unknown provider: {prov_name}"}}, False
+
+        prov_adapter = _get_adapter_for_provider(prov_name)
+
+        # 构建请求
+        req_body = dict(body)
+        req_body["messages"] = messages
+        req_body["model"] = model
+
+        req_for_provider = prov_adapter.transform_request(req_body, _provider_config_to_dict(prov_config))
+        req_for_provider["model"] = model
+
+        prov_target_url = prov_adapter.get_target_url(_provider_config_to_dict(prov_config), model)
+        if not prov_target_url.startswith("http"):
+            prov_target_url = f"http://{prov_target_url}"
+
+        prov_headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {prov_config.api_key}",
+        }
+
+        prov_timeout = (prov_config.timeout_ms or _config.server.get("timeout_ms", 600000)) / 1000
+
+        logger.info(f"[{request_id}] Workflow {step_name}: calling {prov_name} at {prov_target_url}")
+
+        try:
+            async with httpx.AsyncClient(timeout=prov_timeout) as client:
+                response = await client.post(prov_target_url, json=req_for_provider, headers=prov_headers)
+                response.raise_for_status()
+                resp_data = response.json()
+
+                # 记录 usage
+                if _usage_stats and isinstance(resp_data, dict):
+                    usage = resp_data.get("usage", {})
+                    _usage_stats.record(
+                        provider=prov_name, model=model,
+                        input_tokens=usage.get("input_tokens", 0),
+                        output_tokens=usage.get("output_tokens", 0),
+                        latency_ms=(time.time() - start_time) * 1000,
+                        success=True, route_rule=f"workflow.{step_name}",
+                    )
+
+                return resp_data, False
+        except Exception as e:
+            logger.warning(f"[{request_id}] Workflow {step_name} failed: {e}")
+            if _usage_stats:
+                _usage_stats.record(
+                    provider=prov_name, model=model,
+                    input_tokens=0, output_tokens=0,
+                    latency_ms=(time.time() - start_time) * 1000,
+                    success=False, route_rule=f"workflow.{step_name}",
+                )
+            return {"error": {"type": "workflow_error", "message": str(e)}}, False
+
+    # Step 1: Intention Analysis (基于 keywords.json)
+    intent = _detect_workflow_intent(body, _config.keywords)
+    is_chat = (intent == "chat")
+    logger.info(f"[{request_id}] Workflow intention (keyword-based): {intent}")
+
+    if is_streaming:
+        # 流式处理：每个步骤的结果直接 yield
+        from .protocol.openai_sse import OpenAISSEConverter
+
+        async def workflow_stream_generator() -> AsyncGenerator[bytes, None]:
+            if is_chat:
+                # 闲聊：直接调用 chat_intention
+                resp, _ = await call_provider(
+                    workflow_config.chat_intention,
+                    body.get("messages", []),
+                    "chat_intention"
+                )
+                if "error" in resp:
+                    yield f"data: {json.dumps(resp, ensure_ascii=False)}\n\n".encode("utf-8")
+                else:
+                    # 简单流式返回
+                    if isinstance(resp, dict) and resp.get("content"):
+                        yield f"data: {json.dumps(resp, ensure_ascii=False)}\n\n".encode("utf-8")
+            else:
+                # 任务：problem_analyze → solution_plan → execute_solve
+
+                # Step 2: Problem Analyze
+                analysis_prompt = "请分析这个问题，详细说明问题的本质和关键点。"
+                analysis_messages = [
+                    *body.get("messages", []),
+                    {"role": "assistant", "content": intention_text},
+                    {"role": "user", "content": analysis_prompt}
+                ]
+                resp, _ = await call_provider(workflow_config.problem_analyze, analysis_messages, "problem_analyze")
+                if "error" not in resp:
+                    yield f"data: {json.dumps(resp, ensure_ascii=False)}\n\n".encode("utf-8")
+
+                # Step 3: Solution Plan
+                plan_prompt = "请基于以上分析，制定解决方案。"
+                plan_messages = [
+                    *body.get("messages", []),
+                    {"role": "assistant", "content": intention_text},
+                    {"role": "user", "content": analysis_prompt}
+                ]
+                # 添加分析结果
+                analysis_content = ""
+                if isinstance(resp, dict):
+                    content = resp.get("content", [])
+                    if isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                analysis_content = block.get("text", "")
+                                break
+                plan_messages.append({"role": "assistant", "content": analysis_content})
+                plan_messages.append({"role": "user", "content": plan_prompt})
+
+                resp, _ = await call_provider(workflow_config.solution_plan, plan_messages, "solution_plan")
+                if "error" not in resp:
+                    yield f"data: {json.dumps(resp, ensure_ascii=False)}\n\n".encode("utf-8")
+
+                # Step 4: Execute Solve
+                execute_prompt = "请执行以上解决方案。"
+                execute_messages = [
+                    *body.get("messages", []),
+                    {"role": "user", "content": analysis_prompt}
+                ]
+                execute_messages.append({"role": "assistant", "content": analysis_content})
+
+                plan_content = ""
+                if isinstance(resp, dict):
+                    content = resp.get("content", [])
+                    if isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                plan_content = block.get("text", "")
+                                break
+                execute_messages.append({"role": "assistant", "content": plan_content})
+                execute_messages.append({"role": "user", "content": execute_prompt})
+
+                resp, _ = await call_provider(workflow_config.execute_solve, execute_messages, "execute_solve")
+                if "error" in resp:
+                    yield f"data: {json.dumps(resp, ensure_ascii=False)}\n\n".encode("utf-8")
+                else:
+                    yield f"data: {json.dumps(resp, ensure_ascii=False)}\n\n".encode("utf-8")
+
+        return StreamingResponse(workflow_stream_generator(), media_type="text/event-stream")
+    else:
+        # 非流式处理：收集所有结果后返回
+        if is_chat:
+            resp, _ = await call_provider(
+                workflow_config.chat_intention,
+                body.get("messages", []),
+                "chat_intention"
+            )
+            return JSONResponse(content=resp)
+        else:
+            # 任务处理流程
+            # Step 2: Problem Analyze
+            analysis_prompt = "请分析这个问题，详细说明问题的本质和关键点。"
+            analysis_messages = [
+                *body.get("messages", []),
+                {"role": "assistant", "content": intention_text},
+                {"role": "user", "content": analysis_prompt}
+            ]
+            analysis_resp, _ = await call_provider(workflow_config.problem_analyze, analysis_messages, "problem_analyze")
+
+            # Step 3: Solution Plan
+            plan_prompt = "请基于以上分析，制定解决方案。"
+            plan_messages = [
+                *body.get("messages", []),
+                {"role": "assistant", "content": intention_text},
+                {"role": "user", "content": analysis_prompt}
+            ]
+            analysis_content = ""
+            if isinstance(analysis_resp, dict):
+                content = analysis_resp.get("content", [])
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            analysis_content = block.get("text", "")
+                            break
+            plan_messages.append({"role": "assistant", "content": analysis_content})
+            plan_messages.append({"role": "user", "content": plan_prompt})
+
+            plan_resp, _ = await call_provider(workflow_config.solution_plan, plan_messages, "solution_plan")
+
+            # Step 4: Execute Solve
+            execute_prompt = "请执行以上解决方案。"
+            execute_messages = [
+                *body.get("messages", []),
+                {"role": "user", "content": analysis_prompt}
+            ]
+            execute_messages.append({"role": "assistant", "content": analysis_content})
+
+            plan_content = ""
+            if isinstance(plan_resp, dict):
+                content = plan_resp.get("content", [])
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            plan_content = block.get("text", "")
+                            break
+            execute_messages.append({"role": "assistant", "content": plan_content})
+            execute_messages.append({"role": "user", "content": execute_prompt})
+
+            resp, _ = await call_provider(workflow_config.execute_solve, execute_messages, "execute_solve")
+            return JSONResponse(content=resp)
 
 
 def run(host: str | None = None, port: int | None = None, config_path: str | None = None):
