@@ -889,6 +889,13 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
 
         prov_timeout = (prov_config.timeout_ms or _config.server.get("timeout_ms", 600000)) / 1000
 
+        # Debug: log the actual request being sent (first user msg + model)
+        first_user = next((m["content"] for m in messages if m.get("role") == "user"), None)
+        if isinstance(first_user, list):
+            first_user = next((c["text"] for c in first_user if c.get("type") == "text"), None)
+        preview = str(first_user)[:250].replace("\n", " ") if first_user else "(no user msg)"
+        logger.debug(f"[{request_id}] → [{prov_name}] req: model={model}, stream=True, first_user={preview}")
+
         logger.info(f"[{request_id}] Workflow {step_name} streaming: {prov_name} at {prov_target_url}")
 
         try:
@@ -934,6 +941,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                     latency_ms=(time.time() - start_time) * 1000,
                     success=True, route_rule=f"workflow.{step_name}",
                 )
+            logger.debug(f"[{request_id}] ← [{prov_name}] stream completed, step={step_name}")
 
         except Exception as e:
             logger.warning(f"[{request_id}] Workflow {step_name} streaming failed: {e}")
@@ -964,6 +972,15 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                     yield chunk
             else:
                 # 任务：直接调用 execute_solve 模型处理
+                msgs = body.get("messages", [])
+                first_user = next((m["content"] for m in msgs if m.get("role") == "user"), None)
+                if isinstance(first_user, list):
+                    first_user = next((c["text"] for c in first_user if c.get("type") == "text"), None)
+                if first_user:
+                    preview = str(first_user)[:300].replace("\n", " ")
+                    logger.info(f"[{request_id}] Task → execute_solve (minimax). First user msg: {preview}")
+                else:
+                    logger.info(f"[{request_id}] Task → execute_solve (minimax)")
                 async for chunk in call_provider_streaming(
                     workflow_config.execute_solve,
                     body.get("messages", []),
@@ -988,6 +1005,11 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 body.get("messages", []),
                 "execute_solve"
             )
+            if isinstance(resp, dict):
+                content = resp.get("content", [])
+                if isinstance(content, list):
+                    text_preview = "".join(b.get("text","") for b in content if isinstance(b,dict) and b.get("type")=="text")[:300]
+                    logger.info(f"[{request_id}] execute_solve resp preview: {text_preview[:200].replace(chr(10),' ')}")
             return JSONResponse(content=resp)
 
 

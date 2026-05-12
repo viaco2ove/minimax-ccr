@@ -95,8 +95,7 @@ class WorkflowConfig:
     enabled: bool = False
     intention_analyze: str = "minimax:MiniMax-M2.7"
     chat_intention: str = "minimax:MiniMax-M2.7"
-    problem_analyze: str = "qianfan:qianfan-code-latest"
-    solution_plan: str = "qianfan:qianfan-code-latest"
+    analyze_plan: str = "qianfan:qianfan-code-latest"
     execute_solve: str = "minimax:MiniMax-M2.7"
 
     @classmethod
@@ -105,8 +104,7 @@ class WorkflowConfig:
             enabled=data.get("enabled", False),
             intention_analyze=data.get("intention_analyze", "minimax:MiniMax-M2.7"),
             chat_intention=data.get("chat_intention", "minimax:MiniMax-M2.7"),
-            problem_analyze=data.get("problem_analyze", "qianfan:qianfan-code-latest"),
-            solution_plan=data.get("solution_plan", "qianfan:qianfan-code-latest"),
+            analyze_plan=data.get("analyze_plan", data.get("problem_analyze", "qianfan:qianfan-code-latest")),
             execute_solve=data.get("execute_solve", "minimax:MiniMax-M2.7"),
         )
 
