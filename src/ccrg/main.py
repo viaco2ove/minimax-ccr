@@ -888,7 +888,6 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 analysis_prompt = "请分析这个问题，详细说明问题的本质和关键点。"
                 analysis_messages = [
                     *body.get("messages", []),
-                    {"role": "assistant", "content": intention_text},
                     {"role": "user", "content": analysis_prompt}
                 ]
                 resp, _ = await call_provider(workflow_config.problem_analyze, analysis_messages, "problem_analyze")
@@ -899,7 +898,6 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 plan_prompt = "请基于以上分析，制定解决方案。"
                 plan_messages = [
                     *body.get("messages", []),
-                    {"role": "assistant", "content": intention_text},
                     {"role": "user", "content": analysis_prompt}
                 ]
                 # 添加分析结果
@@ -959,7 +957,6 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
             analysis_prompt = "请分析这个问题，详细说明问题的本质和关键点。"
             analysis_messages = [
                 *body.get("messages", []),
-                {"role": "assistant", "content": intention_text},
                 {"role": "user", "content": analysis_prompt}
             ]
             analysis_resp, _ = await call_provider(workflow_config.problem_analyze, analysis_messages, "problem_analyze")
@@ -968,7 +965,6 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
             plan_prompt = "请基于以上分析，制定解决方案。"
             plan_messages = [
                 *body.get("messages", []),
-                {"role": "assistant", "content": intention_text},
                 {"role": "user", "content": analysis_prompt}
             ]
             analysis_content = ""
