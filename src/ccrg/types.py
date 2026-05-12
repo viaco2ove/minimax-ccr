@@ -118,7 +118,7 @@ class GatewayConfig:
     providers: dict[str, ProviderConfig]
     routing: dict
     quota: dict
-    workflow: WorkflowConfig = WorkflowConfig()
+    workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
     keywords: dict = field(default_factory=dict)
 
     @classmethod
