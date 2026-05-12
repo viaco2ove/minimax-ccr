@@ -5030,6 +5030,39 @@
       "latency_ms": 48642.85206794739,
       "success": true,
       "route_rule": "scenario.compact"
+    },
+    {
+      "timestamp": "2026-05-12T11:28:30.261238",
+      "provider": "minimax",
+      "model": "MiniMax-M2.7",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "latency_ms": 20378.41296195984,
+      "success": true,
+      "route_rule": "scenario.compact"
+    },
+    {
+      "timestamp": "2026-05-12T11:28:38.117633",
+      "provider": "minimax",
+      "model": "MiniMax-M2.7",
+      "input_tokens": 2407,
+      "output_tokens": 226,
+      "total_tokens": 2633,
+      "latency_ms": 7843.37043762207,
+      "success": true,
+      "route_rule": "scenario.compact"
+    },
+    {
+      "timestamp": "2026-05-12T11:28:51.870872",
+      "provider": "minimax",
+      "model": "MiniMax-M2.7",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "latency_ms": 13647.943496704102,
+      "success": true,
+      "route_rule": "scenario.compact"
     }
   ]
 }

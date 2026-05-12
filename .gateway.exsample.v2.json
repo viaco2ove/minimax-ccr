@@ -18,7 +18,7 @@
       "capabilities": {
         "tool_use": true,
         "streaming": true,
-        "thinking": false,
+        "thinking": true,
         "vision": true,
         "max_context": 128000
       },
@@ -40,7 +40,7 @@
       "capabilities": {
         "tool_use": true,
         "streaming": true,
-        "thinking": false,
+        "thinking": true,
         "vision": false,
         "max_context": 128000
       },
@@ -59,7 +59,7 @@
       "capabilities": {
         "tool_use": true,
         "streaming": true,
-        "thinking": false,
+        "thinking": true,
         "vision": true,
         "max_context": 128000
       },
@@ -81,7 +81,7 @@
         "tool_use": true,
         "streaming": true,
         "thinking": true,
-        "vision": false,
+        "vision": true,
         "max_context": 64000
       },
       "cost_tier": "premium",
