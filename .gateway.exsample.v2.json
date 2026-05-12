@@ -45,9 +45,9 @@
         "max_context": 128000
       },
       "cost_tier": "cheap",
-      "timeout_ms": 800000,
+      "timeout_ms": 120000,
       "retry": {
-        "max_attempts": 2,
+        "max_attempts": 3,
         "retry_on_status": [429, 500, 502, 503]
       }
     },
@@ -105,7 +105,7 @@
       "long_context": {
         "route": "qianfan:qianfan-code-latest",
         "fallback": ["minimax:MiniMax-M2.7"],
-        "threshold": 80000
+        "threshold": 100000
       },
       "web_search": {
         "route": "minimax:MiniMax-M2.7",
@@ -147,7 +147,7 @@
     "keyword_routing": {
       "rules": [
         {
-          "keywords": ["架构", "architecture", "重构", "refactor"],
+          "keywords": ["架构", "architecture", "重构", "refactor", "优化", "设计模式", "模块化", "拆分", "合并", "升级", "改造"],
           "match_mode": "any",
           "scope": "user_message",
           "route": "qianfan:qianfan-code-latest",
@@ -172,5 +172,13 @@
       "fallback_on_exhaust": "minimax:MiniMax-M2.7",
       "warning_threshold": 0.2
     }
+  },
+  "workflow": {
+    "enabled": true,
+    "intention_analyze": "minimax:MiniMax-M2.7",
+    "chat_intention": "minimax:MiniMax-M2.7",
+    "problem_analyze": "qianfan:qianfan-code-latest",
+    "solution_plan": "qianfan:qianfan-code-latest",
+    "execute_solve": "minimax:MiniMax-M2.7"
   }
 }

@@ -76,6 +76,15 @@ def load_config(config_path: str | Path | None = None) -> GatewayConfig:
 
     logger.info(f"Loaded {len(gateway_config.providers)} providers, routing priority: {gateway_config.routing.get('priority', [])}")
 
+    # 加载 keywords.json
+    keywords_path = config_path.parent / "keywords.json"
+    if keywords_path.exists():
+        with open(keywords_path, encoding="utf-8") as f:
+            gateway_config.keywords = json.load(f)
+        logger.info(f"Loaded keywords from {keywords_path}")
+    else:
+        logger.warning(f"keywords.json not found at {keywords_path}, workflow intent detection will use default logic")
+
     return gateway_config
 
 
