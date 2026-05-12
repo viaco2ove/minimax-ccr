@@ -147,7 +147,8 @@
     "keyword_routing": {
       "rules": [
         {
-          "keywords": ["架构", "architecture", "重构", "refactor", "优化", "设计模式", "模块化", "拆分", "合并", "升级", "改造"],
+          "keywords": ["架构", "architecture", "重构", "refactor", "优化", "设计模式", "模块化",
+            "拆分", "合并", "升级", "改造","分析","设计","处理"],
           "match_mode": "any",
           "scope": "user_message",
           "route": "qianfan:qianfan-code-latest",

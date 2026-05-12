@@ -9,6 +9,7 @@ import uuid
 from typing import AsyncGenerator
 
 import httpx
+from httpx import HTTPStatusError
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
@@ -878,6 +879,21 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
         """构建 workflow 消息"""
         return {"role": role, "content": content}
 
+    async def call_provider_with_fallback(
+        route_list: list[str], messages: list, step_name: str
+    ) -> tuple[dict, bool]:
+        """依次尝试每个 provider，返回第一个成功的响应；全部失败则返回最后一个错误"""
+        last_resp = None
+        for route_str in route_list:
+            resp, is_streaming = await call_provider(route_str, messages, step_name)
+            # 非 error 即成功
+            if not (isinstance(resp, dict) and "error" in resp):
+                return resp, is_streaming
+            last_resp = resp
+            logger.warning(f"[{request_id}] {step_name} provider {route_str} failed, trying next...")
+        # 全部失败，返回最后一个错误
+        return last_resp or {"error": {"type": "workflow_error", "message": "All providers failed"}}, False
+
     async def call_provider(route_str: str, messages: list, step_name: str) -> tuple[dict, bool]:
         """调用单个 provider，返回 (response_data, is_streaming)"""
         prov_name, model = parse_provider_model(route_str)
@@ -939,6 +955,53 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                         logger.debug(f"[{request_id}] ← [{prov_name}] resp: step={step_name}, preview={text_preview[:200].replace(chr(10),' ')}")
                 logger.debug(f"[{request_id}] ← [{prov_name}] completed, step={step_name}")
                 return resp_data, False
+        except HTTPStatusError as e:
+            # 检查是否是 context length 超限错误
+            if e.response.status_code == 400:
+                try:
+                    err_body = e.response.json()
+                    err_msg = err_body.get("error", {}).get("message", "") or str(err_body)
+                except Exception:
+                    err_msg = str(e)
+
+                # 识别 token 超限相关错误
+                token_limit_keywords = [
+                    "context length", "token limit", "max tokens",
+                    "too many tokens", "exceed", "quota",
+                    "length", "limit", "maximum context"
+                ]
+                is_context_error = any(kw in err_msg.lower() for kw in token_limit_keywords)
+
+                if is_context_error:
+                    user_msg = (
+                        "API Error: HTTP 400 - Context length limit exceeded. "
+                        "Please compress or clear the conversation context."
+                    )
+                    logger.error(f"[{request_id}] Context length exceeded for {prov_name}: {err_msg}")
+                    if _usage_stats:
+                        _usage_stats.record(
+                            provider=prov_name, model=model,
+                            input_tokens=0, output_tokens=0,
+                            latency_ms=(time.time() - start_time) * 1000,
+                            success=False, route_rule=f"workflow.{step_name}",
+                        )
+                    return {
+                        "error": {
+                            "type": "context_length_exceeded",
+                            "message": user_msg,
+                            "provider_message": err_msg,
+                        }
+                    }, False
+
+            logger.warning(f"[{request_id}] Workflow {step_name} failed: {e}")
+            if _usage_stats:
+                _usage_stats.record(
+                    provider=prov_name, model=model,
+                    input_tokens=0, output_tokens=0,
+                    latency_ms=(time.time() - start_time) * 1000,
+                    success=False, route_rule=f"workflow.{step_name}",
+                )
+            return {"error": {"type": "workflow_error", "message": str(e)}}, False
         except Exception as e:
             logger.warning(f"[{request_id}] Workflow {step_name} failed: {e}")
             if _usage_stats:
@@ -1034,6 +1097,48 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 )
             logger.debug(f"[{request_id}] ← [{prov_name}] stream completed, step={step_name}")
 
+        except HTTPStatusError as e:
+            # 检查是否是 context length 超限错误
+            if e.response.status_code == 400:
+                try:
+                    err_body = e.response.json()
+                    err_msg = err_body.get("error", {}).get("message", "") or str(err_body)
+                except Exception:
+                    err_msg = str(e)
+
+                token_limit_keywords = [
+                    "context length", "token limit", "max tokens",
+                    "too many tokens", "exceed", "quota",
+                    "length", "limit", "maximum context"
+                ]
+                is_context_error = any(kw in err_msg.lower() for kw in token_limit_keywords)
+
+                if is_context_error:
+                    user_msg = (
+                        "API Error: HTTP 400 - Context length limit exceeded. "
+                        "Please compress or clear the conversation context."
+                    )
+                    logger.error(f"[{request_id}] Context length exceeded for {prov_name}: {err_msg}")
+                    if _usage_stats:
+                        _usage_stats.record(
+                            provider=prov_name, model=model,
+                            input_tokens=0, output_tokens=0,
+                            latency_ms=(time.time() - start_time) * 1000,
+                            success=False, route_rule=f"workflow.{step_name}",
+                        )
+                    yield f"data: {json.dumps({'error': {'type': 'context_length_exceeded', 'message': user_msg}}, ensure_ascii=False)}\n\n".encode("utf-8")
+                    return
+
+            logger.warning(f"[{request_id}] Workflow {step_name} streaming failed: {e}")
+            yield f"data: {json.dumps({'error': {'type': 'workflow_error', 'message': str(e)}}, ensure_ascii=False)}\n\n".encode("utf-8")
+            if _usage_stats:
+                _usage_stats.record(
+                    provider=prov_name, model=model,
+                    input_tokens=0, output_tokens=0,
+                    latency_ms=(time.time() - start_time) * 1000,
+                    success=False, route_rule=f"workflow.{step_name}",
+                )
+
         except Exception as e:
             logger.warning(f"[{request_id}] Workflow {step_name} streaming failed: {e}")
             yield f"data: {json.dumps({'error': {'type': 'workflow_error', 'message': str(e)}}, ensure_ascii=False)}\n\n".encode("utf-8")
@@ -1083,27 +1188,40 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                     # 用户主动输入的 task → 先 analyze_plan (qianfan)，再 execute_solve (minimax)
                     logger.info(f"[{request_id}] Task (user-initiated) → analyze_plan then execute_solve. Last user msg: {preview}")
 
-                    # Step 2a: analyze_plan - 非流式调用 qianfan 做分析规划
-                    analyze_resp, _ = await call_provider(
+                    # Step 2a: analyze_plan - 带 fallback 的非流式调用
+                    analyze_resp, _ = await call_provider_with_fallback(
                         workflow_config.analyze_plan,
                         msgs,
                         "analyze_plan"
                     )
-                    logger.info(f"[{request_id}] analyze_plan completed, proceeding to execute_solve")
+
+                    # 检查 analyze_plan 是否失败（HTTP 错误或返回 error dict）
+                    if isinstance(analyze_resp, dict) and "error" in analyze_resp:
+                        err = analyze_resp["error"]
+                        err_msg = err.get("message", str(err))
+                        err_type = err.get("type", "unknown")
+                        logger.warning(
+                            f"[{request_id}] analyze_plan failed (type={err_type}): {err_msg}. "
+                            "Proceeding to execute_solve without analysis context."
+                        )
+                        # 继续用原始 messages 执行 execute_solve（不注入分析结果）
+                        analyze_text = ""
+                    else:
+                        logger.info(f"[{request_id}] analyze_plan completed, proceeding to execute_solve")
+                        # 正常提取分析文本
+                        analyze_text = ""
+                        if isinstance(analyze_resp, dict):
+                            analyze_content = analyze_resp.get("content", [])
+                            if isinstance(analyze_content, list):
+                                analyze_text = "".join(
+                                    b.get("text", "") for b in analyze_content
+                                    if isinstance(b, dict) and b.get("type") == "text"
+                                )
+                            elif isinstance(analyze_content, str):
+                                analyze_text = analyze_content
 
                     # Step 2b: execute_solve - 流式调用 minimax 执行
                     # 将 analyze_plan 的结果注入 messages 作为额外上下文
-                    analyze_text = ""
-                    if isinstance(analyze_resp, dict):
-                        analyze_content = analyze_resp.get("content", [])
-                        if isinstance(analyze_content, list):
-                            analyze_text = "".join(
-                                b.get("text", "") for b in analyze_content
-                                if isinstance(b, dict) and b.get("type") == "text"
-                            )
-                        elif isinstance(analyze_content, str):
-                            analyze_text = analyze_content
-
                     if analyze_text:
                         augmented_msgs = list(msgs) + [
                             {"role": "assistant", "content": f"[analyze_plan] {analyze_text}"},
@@ -1148,25 +1266,36 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 logger.info(f"[{request_id}] Task (user-initiated) → analyze_plan then execute_solve")
 
                 # Step 2a: analyze_plan
-                analyze_resp, _ = await call_provider(
+                analyze_resp, _ = await call_provider_with_fallback(
                     workflow_config.analyze_plan,
                     msgs,
                     "analyze_plan"
                 )
-                logger.info(f"[{request_id}] analyze_plan completed, proceeding to execute_solve")
+
+                # 检查 analyze_plan 是否失败
+                if isinstance(analyze_resp, dict) and "error" in analyze_resp:
+                    err = analyze_resp["error"]
+                    err_msg = err.get("message", str(err))
+                    err_type = err.get("type", "unknown")
+                    logger.warning(
+                        f"[{request_id}] analyze_plan failed (type={err_type}): {err_msg}. "
+                        "Proceeding to execute_solve without analysis context."
+                    )
+                    analyze_text = ""
+                else:
+                    logger.info(f"[{request_id}] analyze_plan completed, proceeding to execute_solve")
+                    analyze_text = ""
+                    if isinstance(analyze_resp, dict):
+                        analyze_content = analyze_resp.get("content", [])
+                        if isinstance(analyze_content, list):
+                            analyze_text = "".join(
+                                b.get("text", "") for b in analyze_content
+                                if isinstance(b, dict) and b.get("type") == "text"
+                            )
+                        elif isinstance(analyze_content, str):
+                            analyze_text = analyze_content
 
                 # Step 2b: execute_solve
-                analyze_text = ""
-                if isinstance(analyze_resp, dict):
-                    analyze_content = analyze_resp.get("content", [])
-                    if isinstance(analyze_content, list):
-                        analyze_text = "".join(
-                            b.get("text", "") for b in analyze_content
-                            if isinstance(b, dict) and b.get("type") == "text"
-                        )
-                    elif isinstance(analyze_content, str):
-                        analyze_text = analyze_content
-
                 if analyze_text:
                     augmented_msgs = list(msgs) + [
                         {"role": "assistant", "content": f"[analyze_plan] {analyze_text}"},
