@@ -2,6 +2,9 @@
 
 极薄的 AI 请求网关，支持在同一 agent loop 内根据请求特征动态路由到不同 provider。
 
+解决的问题是：
+1.命中codeplan 套餐
+2.分流token 不同的模型做不同的事情
 ## 特性
 
 - **智能路由**: 按 scenario / tool 类型 / 关键词做请求分类
