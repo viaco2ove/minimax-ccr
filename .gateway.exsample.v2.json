@@ -36,7 +36,7 @@
       "api_base_url": "https://qianfan.baidubce.com/anthropic/coding",
       "api_key": "xxxx",
       "protocol": "codeplan_anthropic",
-      "models": ["qianfan-code-latest"],
+      "models": ["qianfan-code-latest","ernie-4.5-turbo-20260402"],
       "capabilities": {
         "tool_use": true,
         "streaming": true,
@@ -44,6 +44,7 @@
         "vision": false,
         "max_context": 128000
       },
+      "per_request_delay_ms": 500,
       "cost_tier": "cheap",
       "timeout_ms": 120000,
       "retry": {
@@ -96,28 +97,28 @@
     "scenarios": {
       "background": {
         "route": "minimax:MiniMax-M2.7",
-        "fallback": ["qianfan:qianfan-code-latest"]
+        "fallback": ["qianfan:qianfan-code-latest","qianfan:ernie-4.5-turbo-20260402"]
       },
       "think": {
         "route": "qianfan:qianfan-code-latest",
-        "fallback": ["qianfan:qianfan-code-latest","minimax:MiniMax-M2.7"]
+        "fallback": ["qianfan:ernie-4.5-turbo-20260402","minimax:MiniMax-M2.7"]
       },
       "long_context": {
         "route": "qianfan:qianfan-code-latest",
-        "fallback": ["minimax:MiniMax-M2.7"],
-        "threshold": 100000
+        "fallback": ["qianfan:ernie-4.5-turbo-20260402","minimax:MiniMax-M2.7"],
+        "threshold": 80000
       },
       "web_search": {
         "route": "minimax:MiniMax-M2.7",
-        "fallback": ["qianfan:qianfan-code-latest","minimax:MiniMax-M2.7"]
+        "fallback": ["qianfan:qianfan-code-latest","qianfan:ernie-4.5-turbo-20260402","minimax:MiniMax-M2.7"]
       },
       "image": {
         "route": "mmx:MiniMax-M2.7",
-        "fallback": ["minimax:MiniMax-M2.7","qianfan:qianfan-code-latest"]
+        "fallback": ["minimax:MiniMax-M2.7","qianfan:qianfan-code-latest","qianfan:ernie-4.5-turbo-20260402"]
       },
       "compact": {
         "route": "minimax:MiniMax-M2.7",
-        "fallback": ["qianfan:qianfan-code-latest"]
+        "fallback": ["qianfan:qianfan-code-latest","qianfan:ernie-4.5-turbo-20260402"]
       }
     },
     "tool_routing": {
@@ -129,19 +130,19 @@
         ],
         "match_mode": "any",
         "route": "minimax:MiniMax-M2.7",
-        "fallback": ["qianfan:qianfan-code-latest","minimax:MiniMax-M2.7"]
+        "fallback": ["qianfan:qianfan-code-latest","qianfan:ernie-4.5-turbo-20260402","minimax:MiniMax-M2.7"]
       },
       "standard_tasks": {
         "match": ["Edit", "Write", "NotebookEdit"],
         "match_mode": "any",
         "route": "minimax:MiniMax-M2.7",
-        "fallback": ["qianfan:qianfan-code-latest","minimax:MiniMax-M2.7"]
+        "fallback": ["qianfan:qianfan-code-latest","qianfan:ernie-4.5-turbo-20260402","minimax:MiniMax-M2.7"]
       },
       "complex_tasks": {
         "match": ["Agent", "TaskCreate", "EnterPlanMode"],
         "match_mode": "any",
         "route": "qianfan:qianfan-code-latest",
-        "fallback": ["minimax:MiniMax-M2.7"]
+        "fallback": ["qianfan:ernie-4.5-turbo-20260402","minimax:MiniMax-M2.7"]
       }
     },
     "keyword_routing": {
@@ -159,7 +160,7 @@
           "match_mode": "any",
           "scope": "user_message",
           "route": "minimax:MiniMax-M2.7",
-          "fallback": ["qianfan:qianfan-code-latest"]
+          "fallback": ["qianfan:qianfan-code-latest","qianfan:ernie-4.5-turbo-20260402"]
         }
       ]
     },
@@ -176,9 +177,9 @@
   },
   "workflow": {
     "enabled": true,
-    "intention_analyze": "minimax:MiniMax-M2.7",
-    "chat_intention": "minimax:MiniMax-M2.7",
-    "analyze_plan": "qianfan:qianfan-code-latest",
-    "execute_solve": "minimax:MiniMax-M2.7"
+    "intention_analyze": ["minimax:MiniMax-M2.7"],
+    "chat_intention": ["minimax:MiniMax-M2.7"],
+    "analyze_plan": ["qianfan:qianfan-code-latest","qianfan:ernie-4.5-turbo-20260402"],
+    "execute_solve": ["minimax:MiniMax-M2.7"]
   }
 }
