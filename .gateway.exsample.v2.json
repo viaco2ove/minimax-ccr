@@ -44,11 +44,31 @@
         "vision": false,
         "max_context": 128000
       },
+      "per_request_delay_ms": 1500,
+      "cost_tier": "cheap",
+      "timeout_ms": 120000,
+      "retry": {
+        "max_attempts": 1,
+        "retry_on_status": [429, 500, 502, 503]
+      }
+    },
+   "doubao": {
+      "api_base_url": "https://ark.cn-beijing.volces.com/api/coding",
+      "api_key": "xxxx",
+      "protocol": "codeplan_anthropic",
+      "models": ["ark-code-latest","glm-5.1","Kimi-K2.6","doubao-seed-2.0-code"],
+      "capabilities": {
+        "tool_use": true,
+        "streaming": true,
+        "thinking": true,
+        "vision": false,
+        "max_context": 128000
+      },
       "per_request_delay_ms": 500,
       "cost_tier": "cheap",
       "timeout_ms": 120000,
       "retry": {
-        "max_attempts": 3,
+        "max_attempts": 1,
         "retry_on_status": [429, 500, 502, 503]
       }
     },
@@ -97,28 +117,28 @@
     "scenarios": {
       "background": {
         "route": "minimax:MiniMax-M2.7",
-        "fallback": ["qianfan:qianfan-code-latest","qianfan:ernie-4.5-turbo-20260402"]
+        "fallback": ["doubao:doubao-seed-2.0-code"]
       },
       "think": {
-        "route": "qianfan:qianfan-code-latest",
-        "fallback": ["qianfan:ernie-4.5-turbo-20260402","minimax:MiniMax-M2.7"]
+        "route": "doubao:doubao-seed-2.0-code",
+        "fallback": ["doubao:doubao-seed-2.0-code","minimax:MiniMax-M2.7"]
       },
       "long_context": {
-        "route": "qianfan:qianfan-code-latest",
-        "fallback": ["qianfan:ernie-4.5-turbo-20260402","minimax:MiniMax-M2.7"],
-        "threshold": 80000
+        "route": "doubao:doubao-seed-2.0-code",
+        "fallback": ["doubao:doubao-seed-2.0-code","minimax:MiniMax-M2.7"],
+        "threshold": 100000
       },
       "web_search": {
         "route": "minimax:MiniMax-M2.7",
-        "fallback": ["qianfan:qianfan-code-latest","qianfan:ernie-4.5-turbo-20260402","minimax:MiniMax-M2.7"]
+        "fallback": ["doubao:doubao-seed-2.0-code","minimax:MiniMax-M2.7"]
       },
       "image": {
         "route": "mmx:MiniMax-M2.7",
-        "fallback": ["minimax:MiniMax-M2.7","qianfan:qianfan-code-latest","qianfan:ernie-4.5-turbo-20260402"]
+        "fallback": ["minimax:MiniMax-M2.7","doubao:doubao-seed-2.0-code"]
       },
       "compact": {
         "route": "minimax:MiniMax-M2.7",
-        "fallback": ["qianfan:qianfan-code-latest","qianfan:ernie-4.5-turbo-20260402"]
+        "fallback": ["doubao:doubao-seed-2.0-code"]
       }
     },
     "tool_routing": {
@@ -130,19 +150,19 @@
         ],
         "match_mode": "any",
         "route": "minimax:MiniMax-M2.7",
-        "fallback": ["qianfan:qianfan-code-latest","qianfan:ernie-4.5-turbo-20260402","minimax:MiniMax-M2.7"]
+        "fallback": ["doubao:doubao-seed-2.0-code","minimax:MiniMax-M2.7"]
       },
       "standard_tasks": {
         "match": ["Edit", "Write", "NotebookEdit"],
         "match_mode": "any",
         "route": "minimax:MiniMax-M2.7",
-        "fallback": ["qianfan:qianfan-code-latest","qianfan:ernie-4.5-turbo-20260402","minimax:MiniMax-M2.7"]
+        "fallback": ["doubao:doubao-seed-2.0-code","minimax:MiniMax-M2.7"]
       },
       "complex_tasks": {
         "match": ["Agent", "TaskCreate", "EnterPlanMode"],
         "match_mode": "any",
-        "route": "qianfan:qianfan-code-latest",
-        "fallback": ["qianfan:ernie-4.5-turbo-20260402","minimax:MiniMax-M2.7"]
+        "route": "doubao:doubao-seed-2.0-code",
+        "fallback": ["doubao:doubao-seed-2.0-code","minimax:MiniMax-M2.7"]
       }
     },
     "keyword_routing": {
@@ -152,7 +172,7 @@
             "拆分", "合并", "升级", "改造","分析","设计","处理"],
           "match_mode": "any",
           "scope": "user_message",
-          "route": "qianfan:qianfan-code-latest",
+          "route": "doubao:doubao-seed-2.0-code",
           "fallback": ["minimax:MiniMax-M2.7"]
         },
         {
@@ -160,7 +180,7 @@
           "match_mode": "any",
           "scope": "user_message",
           "route": "minimax:MiniMax-M2.7",
-          "fallback": ["qianfan:qianfan-code-latest","qianfan:ernie-4.5-turbo-20260402"]
+          "fallback": ["doubao:doubao-seed-2.0-code"]
         }
       ]
     },
@@ -179,7 +199,7 @@
     "enabled": true,
     "intention_analyze": ["minimax:MiniMax-M2.7"],
     "chat_intention": ["minimax:MiniMax-M2.7"],
-    "analyze_plan": ["qianfan:qianfan-code-latest","qianfan:ernie-4.5-turbo-20260402"],
+    "analyze_plan": ["doubao:doubao-seed-2.0-code"],
     "execute_solve": ["minimax:MiniMax-M2.7"]
   }
 }
