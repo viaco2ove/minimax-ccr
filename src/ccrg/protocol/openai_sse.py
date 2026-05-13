@@ -23,6 +23,7 @@ class OpenAISSEConverter:
         self.tool_call_index = 0
         self.started = False
         self.output_tokens = 0
+        self.input_tokens = 0
 
     def convert_chunk(self, raw_chunk: bytes) -> list[bytes]:
         """将一个 OpenAI SSE chunk 转换为多个 Anthropic SSE events
@@ -49,6 +50,12 @@ class OpenAISSEConverter:
             chunk = json.loads(data)
         except json.JSONDecodeError:
             return []
+
+        # 尝试从 chunk 中提取 usage 信息（通常在最后一个 chunk）
+        if "usage" in chunk:
+            usage = chunk["usage"]
+            self.input_tokens = usage.get("prompt_tokens", self.input_tokens)
+            self.output_tokens = usage.get("completion_tokens", self.output_tokens)
 
         choice = chunk.get("choices", [{}])[0]
         delta = choice.get("delta", {})
@@ -192,6 +199,17 @@ class OpenAISSEConverter:
             events.append(f"data: {json.dumps(delta)}\n\n".encode("utf-8"))
 
         return events
+
+    def get_usage(self) -> dict[str, int]:
+        """获取 token 使用量
+
+        Returns:
+            {"input_tokens": int, "output_tokens": int}
+        """
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+        }
 
 
 async def convert_openai_sse_stream(
