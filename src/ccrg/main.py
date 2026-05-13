@@ -1561,23 +1561,39 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
     # Step 2: 1:1 透传 - 所有请求都转为流式返回给 Claude Code
     # 不再分步调用 analyze_plan + execute_solve，直接单次调用 provider
     async def workflow_stream_generator() -> AsyncGenerator[bytes, None]:
-        # 确定路由
+        # 确定路由（使用完整 RouteResult 包含 fallback_chain）
         if is_chat:
-            route = workflow_config.get_chat_intention_single()
+            route_str = workflow_config.get_chat_intention_single()
+            fallback_chain = []
             step_name = "chat_intention"
         else:
-            route = _resolve_execute_route(body, request_id)
-            step_name = "execute_solve"
+            # 使用路由引擎获取完整路由结果（包含 fallback）
+            try:
+                tags = _classify_request(body)
+                route_result = _routing_engine.route(tags)
+                route_str = f"{route_result.provider}:{route_result.model}"
+                fallback_chain = route_result.fallback_chain
+                step_name = "execute_solve"
+                logger.info(
+                    f"[{request_id}] {step_name} routed to {route_str} "
+                    f"via {route_result.matched_rule} ({route_result.matched_reason})"
+                    + (f" with {len(fallback_chain)} fallback(s)" if fallback_chain else "")
+                )
+            except Exception as e:
+                logger.warning(f"[{request_id}] {step_name} routing failed ({e}), using workflow default")
+                route_str = _config.workflow.get_execute_solve_single()
+                fallback_chain = []
+                step_name = "execute_solve"
 
         msgs = body.get("messages", [])
 
         # /compact 请求特殊处理
         is_compact = _is_compact_request(body)
         if is_compact:
-            logger.info(f"[{request_id}] /compact request → direct pass-through to {route}")
+            logger.info(f"[{request_id}] /compact request → direct pass-through to {route_str}")
 
         # 预检 context window - 80% 阈值自动截断
-        prov_name, _ = route.split(":", 1) if ":" in route else (route, "")
+        prov_name, _ = route_str.split(":", 1) if ":" in route_str else (route_str, "")
         prov_config = _registry.get(prov_name)
         max_context = prov_config.capabilities.get("max_context", 128000) if prov_config else 128000
         estimated_tokens = _estimate_messages_tokens(msgs)
@@ -1589,13 +1605,31 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 f"truncating {len(body.get('messages', []))} → {len(msgs)} messages"
             )
 
-        # 单次流式调用 provider - 1对1 透传
-        try:
-            async for chunk in call_provider_streaming(route, msgs, step_name):
-                yield chunk
-        except Exception as e:
-            logger.error(f"[{request_id}] {step_name} streaming failed: {e}")
-            yield _make_streaming_error_sse({"error": {"type": "provider_error", "message": str(e)}})
+        # 构建完整路由链（主路由 + fallback）
+        all_routes = [route_str] + [f"{fb[0]}:{fb[1]}" for fb in fallback_chain]
+
+        # 流式调用 provider（带 fallback）
+        success = False
+        last_error = None
+        for try_route in all_routes:
+            try:
+                logger.info(f"[{request_id}] Trying {try_route} for {step_name}")
+                async for chunk in call_provider_streaming(try_route, msgs, step_name):
+                    yield chunk
+                    success = True  # 至少成功 yield 了一个 chunk
+                if success:
+                    logger.info(f"[{request_id}] {step_name} succeeded with {try_route}")
+                    break
+            except Exception as e:
+                last_error = e
+                logger.warning(f"[{request_id}] {try_route} failed for {step_name}: {e}, trying next...")
+                success = False
+                continue
+
+        if not success:
+            error_msg = str(last_error) if last_error else f"All {len(all_routes)} providers failed for {step_name}"
+            logger.error(f"[{request_id}] {error_msg}")
+            yield _make_streaming_error_sse({"error": {"type": "provider_error", "message": error_msg}})
 
     return StreamingResponse(workflow_stream_generator(), media_type="text/event-stream")
 
