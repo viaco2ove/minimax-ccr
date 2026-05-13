@@ -1407,6 +1407,9 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                     if prov_config.protocol == "chat_openai":
                         from .protocol.openai_sse import OpenAISSEConverter
                         converter = OpenAISSEConverter(model)
+                    elif prov_config.protocol in ("codeplan_anthropic", "mmx", "anthropic"):
+                        from .protocol.anthropic_sse import AnthropicSSEConverter
+                        converter = AnthropicSSEConverter(model)
 
                     async for line in response.aiter_lines():
                         line = line.strip()
@@ -1416,17 +1419,19 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                         # 如果是 SSE 格式 data: 开头
                         if line.startswith("data: "):
                             data_content = line[6:]  # 去掉 "data: " 前缀
-                            if data_content == "[DONE]":
-                                break
 
-                            # 如果有 converter，转换格式
+                            # 如果有 converter，转换格式（converter 会处理 [DONE]）
                             if converter:
                                 raw_chunk = line.encode("utf-8")
                                 events = converter.convert_chunk(raw_chunk)
                                 for event in events:
                                     yield event
+                                if data_content == "[DONE]":
+                                    break
                             else:
                                 # 直接 yield 原始数据
+                                if data_content == "[DONE]":
+                                    break
                                 yield f"{line}\n".encode("utf-8")
                         else:
                             # 非 SSE 格式，直接 yield
