@@ -608,12 +608,21 @@ async def _handle_streaming_with_fallback(
 
                         # 流成功完成（正常结束或客户端断开）
                         if first_chunk_sent:
+                            # 从 converter 中提取 token 使用量
+                            if converter and hasattr(converter, "get_usage"):
+                                usage = converter.get_usage()
+                                input_tokens = usage.get("input_tokens", 0)
+                                output_tokens = usage.get("output_tokens", 0)
+                            else:
+                                input_tokens = 0
+                                output_tokens = 0
+
                             latency_ms = (time.time() - start_time) * 1000
                             logger.info(f"[{request_id}] Streaming completed from {prov_name}, latency={latency_ms/1000:.3f}s")
                             if usage_stats:
                                 usage_stats.record(
                                     provider=prov_name, model=model,
-                                    input_tokens=0, output_tokens=0,
+                                    input_tokens=input_tokens, output_tokens=output_tokens,
                                     latency_ms=latency_ms, success=True,
                                     route_rule=matched_rule,
                                 )
@@ -1465,11 +1474,20 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                             # 没有 converter 时，直接 yield 原始行
                             yield f"{line}\n".encode("utf-8")
 
+            # 从 converter 中提取 token 使用量
+            if converter and hasattr(converter, "get_usage"):
+                usage = converter.get_usage()
+                input_tokens = usage.get("input_tokens", 0)
+                output_tokens = usage.get("output_tokens", 0)
+            else:
+                input_tokens = 0
+                output_tokens = 0
+
             # 记录成功
             if _usage_stats:
                 _usage_stats.record(
                     provider=prov_name, model=model,
-                    input_tokens=0, output_tokens=0,
+                    input_tokens=input_tokens, output_tokens=output_tokens,
                     latency_ms=(time.time() - start_time) * 1000,
                     success=True, route_rule=f"workflow.{step_name}",
                 )

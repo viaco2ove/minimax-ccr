@@ -281,3 +281,14 @@ class AnthropicSSEConverter:
         event_type = event.get("type", "message_delta")
         data = json.dumps(event, ensure_ascii=False)
         return f"event: {event_type}\ndata: {data}\n\n".encode("utf-8")
+
+    def get_usage(self) -> dict[str, int]:
+        """获取 token 使用量
+
+        Returns:
+            {"input_tokens": int, "output_tokens": int}
+        """
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+        }
