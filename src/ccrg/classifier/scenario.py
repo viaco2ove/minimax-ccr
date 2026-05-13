@@ -23,17 +23,17 @@ class ScenarioClassifier:
         if self._has_compact(request):
             return "compact"
 
-        # 1. thinking 场景
+        # 1. image 场景（优先级提升：在 thinking 之前检测，因为 Claude Code 总是带 thinking 参数）
+        if self._has_image_content(request):
+            return "image"
+
+        # 2. thinking 场景
         if request.get("thinking"):
             return "think"
 
-        # 2. web_search 场景
+        # 3. web_search 场景
         if self._has_web_search(request):
             return "web_search"
-
-        # 3. image 场景
-        if self._has_image_content(request):
-            return "image"
 
         # 4. background 场景（haiku 模型）
         model = request.get("model", "")
