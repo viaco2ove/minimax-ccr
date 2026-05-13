@@ -867,6 +867,31 @@ def _resolve_execute_route(body: dict, request_id: str) -> str:
         return _config.workflow.get_execute_solve_single()
 
 
+def _get_stage_routes(stage: str) -> tuple[list[str], str]:
+    """根据 workflow 阶段获取路由列表和步骤名
+    
+    Args:
+        stage: workflow 阶段名称（intention_analyze/chat_intention/analyze_plan/execute_solve）
+    
+    Returns:
+        (route_list, step_name): 路由列表（包含 fallback）和步骤名
+    """
+    global _config
+    
+    if stage == "intention_analyze":
+        return _config.workflow.get_intention_analyze_list(), "intention_analyze"
+    elif stage == "chat_intention":
+        return _config.workflow.get_chat_intention_list(), "chat_intention"
+    elif stage == "analyze_plan":
+        return _config.workflow.get_analyze_plan_list(), "analyze_plan"
+    elif stage == "execute_solve":
+        return _config.workflow.get_execute_solve_list(), "execute_solve"
+    else:
+        # 未知阶段，默认 execute_solve
+        logger.warning(f"Unknown workflow_stage: {stage}, defaulting to execute_solve")
+        return _config.workflow.get_execute_solve_list(), "execute_solve"
+
+
 def _is_user_initiated_message(body: dict) -> bool:
     """判断请求是否由用户主动输入触发（而非工具调用循环的后续请求）。
 
@@ -1433,8 +1458,11 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                                 if data_content == "[DONE]":
                                     break
                                 yield f"{line}\n".encode("utf-8")
-                        else:
-                            # 非 SSE 格式，直接 yield
+                        elif line.startswith("event: ") and converter:
+                            # 有 converter 时，event: 行由 converter 内部处理，跳过
+                            converter.convert_chunk(line.encode("utf-8"))
+                        elif not converter:
+                            # 没有 converter 时，直接 yield 原始行
                             yield f"{line}\n".encode("utf-8")
 
             # 记录成功
@@ -1558,42 +1586,49 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
     is_user_initiated = _is_user_initiated_message(body)
     logger.info(f"[{request_id}] Workflow intention (keyword-based): {intent}, user_initiated={is_user_initiated}")
 
-    # Step 2: 1:1 透传 - 所有请求都转为流式返回给 Claude Code
-    # 不再分步调用 analyze_plan + execute_solve，直接单次调用 provider
+    # Step 2: CLI 驱动的分步流式交互 - CCR 只做分流+流式透传
     async def workflow_stream_generator() -> AsyncGenerator[bytes, None]:
-        # 确定路由（使用完整 RouteResult 包含 fallback_chain）
-        if is_chat:
-            route_str = workflow_config.get_chat_intention_single()
-            fallback_chain = []
-            step_name = "chat_intention"
-        else:
-            # 使用路由引擎获取完整路由结果（包含 fallback）
+        # 1. 从 metadata 中获取 workflow_stage
+        metadata = body.get("metadata", {})
+        if isinstance(metadata, str):
             try:
-                tags = _classify_request(body)
-                route_result = _routing_engine.route(tags)
-                route_str = f"{route_result.provider}:{route_result.model}"
-                fallback_chain = route_result.fallback_chain
-                step_name = "execute_solve"
-                logger.info(
-                    f"[{request_id}] {step_name} routed to {route_str} "
-                    f"via {route_result.matched_rule} ({route_result.matched_reason})"
-                    + (f" with {len(fallback_chain)} fallback(s)" if fallback_chain else "")
-                )
-            except Exception as e:
-                logger.warning(f"[{request_id}] {step_name} routing failed ({e}), using workflow default")
-                route_str = _config.workflow.get_execute_solve_single()
-                fallback_chain = []
-                step_name = "execute_solve"
+                metadata = json.loads(metadata)
+            except:
+                metadata = {}
+        
+        stage = metadata.get("workflow_stage")
+        
+        # 2. 如果没有标注，自动判断（向后兼容）
+        if not stage:
+            intent = _detect_workflow_intent(body, _config.keywords)
+            is_chat = (intent == "chat")
+            is_user_initiated = _is_user_initiated_message(body)
+            
+            if is_chat:
+                stage = "chat_intention"
+            elif is_user_initiated:
+                stage = "intention_analyze"  # 首次用户输入 → 意图分析
+            else:
+                stage = "execute_solve"      # 工具回调 → 直接执行
+            
+            logger.info(f"[{request_id}] Workflow stage (auto-detected): {stage}")
+        else:
+            logger.info(f"[{request_id}] Workflow stage (from metadata): {stage}")
+
+        # 3. 根据阶段选择路由和 fallback
+        route_list, step_name = _get_stage_routes(stage)
 
         msgs = body.get("messages", [])
 
         # /compact 请求特殊处理
         is_compact = _is_compact_request(body)
         if is_compact:
-            logger.info(f"[{request_id}] /compact request → direct pass-through to {route_str}")
+            logger.info(f"[{request_id}] /compact request → direct pass-through, overriding stage to execute_solve")
+            route_list, step_name = _get_stage_routes("execute_solve")
 
         # 预检 context window - 80% 阈值自动截断
-        prov_name, _ = route_str.split(":", 1) if ":" in route_str else (route_str, "")
+        first_route = route_list[0] if route_list else "minimax:MiniMax-M2.7"
+        prov_name, _ = first_route.split(":", 1) if ":" in first_route else (first_route, "")
         prov_config = _registry.get(prov_name)
         max_context = prov_config.capabilities.get("max_context", 128000) if prov_config else 128000
         estimated_tokens = _estimate_messages_tokens(msgs)
@@ -1605,13 +1640,10 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 f"truncating {len(body.get('messages', []))} → {len(msgs)} messages"
             )
 
-        # 构建完整路由链（主路由 + fallback）
-        all_routes = [route_str] + [f"{fb[0]}:{fb[1]}" for fb in fallback_chain]
-
-        # 流式调用 provider（带 fallback）
+        # 4. 流式调用 provider（带 fallback）
         success = False
         last_error = None
-        for try_route in all_routes:
+        for try_route in route_list:
             try:
                 logger.info(f"[{request_id}] Trying {try_route} for {step_name}")
                 async for chunk in call_provider_streaming(try_route, msgs, step_name):
@@ -1627,7 +1659,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 continue
 
         if not success:
-            error_msg = str(last_error) if last_error else f"All {len(all_routes)} providers failed for {step_name}"
+            error_msg = str(last_error) if last_error else f"All {len(route_list)} providers failed for {step_name}"
             logger.error(f"[{request_id}] {error_msg}")
             yield _make_streaming_error_sse({"error": {"type": "provider_error", "message": error_msg}})
 

@@ -134,6 +134,18 @@ class WorkflowConfig:
             return [self.execute_solve]
         return self.execute_solve
 
+    def get_chat_intention_list(self) -> list[str]:
+        """获取 chat_intention 列表"""
+        if isinstance(self.chat_intention, str):
+            return [self.chat_intention]
+        return self.chat_intention
+
+    def get_intention_analyze_list(self) -> list[str]:
+        """获取 intention_analyze 列表"""
+        if isinstance(self.intention_analyze, str):
+            return [self.intention_analyze]
+        return self.intention_analyze
+
     def get_chat_intention_single(self) -> str:
         """获取单个 chat_intention（取第一个）"""
         if isinstance(self.chat_intention, str):
