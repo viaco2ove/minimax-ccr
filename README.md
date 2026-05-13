@@ -6,7 +6,12 @@
 1.命中codeplan 套餐
 2.分流token 不同的模型做不同的事情
 
-## 起因：
+## 伪工作流
+扁平化命中机制。内部不做流程，而是摊开分流。
+去命中providers，但是claude code cli 能流式响应的效果。
+## 尽量让每个 provider 都能流式响应。
+claude code cli 一次请求，CCRG 也只发出一个请求
+## 起因：rr
 minimax 2.7 太笨了，但是便宜
 ## 特性
 
