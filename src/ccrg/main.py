@@ -651,8 +651,8 @@ async def _handle_streaming_with_fallback(
         latency = time.time() - start_time
         logger.error(f"[{request_id}] All streaming providers failed after {latency:.3f}s")
         error_msg = str(last_error) if last_error else "All providers failed"
-        error_json = json.dumps({"error": {"type": "upstream_error", "message": error_msg}})
-        yield f"data: {error_json}\n\n".encode("utf-8")
+        error_json = json.dumps({"type": "error", "error": {"type": "api_error", "message": error_msg}})
+        yield f"event: error\ndata: {error_json}\n\n".encode("utf-8")
 
         if usage_stats:
             usage_stats.record(
@@ -831,7 +831,17 @@ def _detect_workflow_intent(body: dict, keywords: dict) -> str:
     logger.debug(f"Workflow intent detection: chat={chat_score}, task={task_score}")
 
     if task_score > chat_score:
+        if task_score > 0:
+            matched = [kw for kw in task_keywords if kw.lower() in user_text]
+            logger.info(f"Matched task keywords: {matched}")
+        if chat_score > 0:
+            matched = [kw for kw in chat_keywords if kw.lower() in user_text]
+            logger.info(f"Matched chat keywords: {matched}")
         return "task"
+    
+    if chat_score > 0:
+        matched = [kw for kw in chat_keywords if kw.lower() in user_text]
+        logger.info(f"Matched chat keywords: {matched}")
     return "chat"
 
 
@@ -901,6 +911,230 @@ def _is_user_initiated_message(body: dict) -> bool:
         return False
 
     return False
+
+
+def _wrap_non_streaming_response(resp: dict) -> bytes:
+    """将非流式 API 响应包装成 Anthropic SSE 流式事件序列。
+
+    Anthropic 流式 API 的事件序列：
+    1. message_start (包含 id, type, role, model, content=[], usage)
+    2. content_block_start (index, type="text", text=[])
+    3. content_block_delta (index, type="text_delta", text=...)
+    4. content_block_stop (index)
+    5. message_delta (stop_reason, usage)
+    6. message_stop
+    """
+    chunks = []
+
+    msg_id = resp.get("id", f"msg_{uuid.uuid4().hex[:24]}")
+    model = resp.get("model", "unknown")
+    role = resp.get("role", "assistant")
+    stop_reason = resp.get("stop_reason", "end_turn")
+    usage = resp.get("usage", {"input_tokens": 0, "output_tokens": 0})
+
+    # 1. message_start
+    chunks.append(f"event: message_start\ndata: {json.dumps({'type': 'message_start', 'message': {'id': msg_id, 'type': 'message', 'role': role, 'model': model, 'content': [], 'stop_reason': None, 'usage': usage}}, ensure_ascii=False)}\n\n")
+
+    # 2-4. content blocks
+    content_blocks = resp.get("content", [])
+    for idx, block in enumerate(content_blocks):
+        if isinstance(block, dict):
+            block_type = block.get("type", "text")
+            if block_type == "text":
+                text = block.get("text", "")
+                # content_block_start
+                chunks.append(f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': idx, 'content_block': {'type': 'text', 'text': ''}}, ensure_ascii=False)}\n\n")
+                # content_block_delta
+                chunks.append(f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': idx, 'delta': {'type': 'text_delta', 'text': text}}, ensure_ascii=False)}\n\n")
+                # content_block_stop
+                chunks.append(f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': idx}, ensure_ascii=False)}\n\n")
+            elif block_type == "tool_use":
+                tool_id = block.get("id", f"toolu_{uuid.uuid4().hex[:24]}")
+                tool_name = block.get("name", "unknown")
+                tool_input = block.get("input", {})
+                # content_block_start
+                chunks.append(f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': idx, 'content_block': {'type': 'tool_use', 'id': tool_id, 'name': tool_name, 'input': {}}}, ensure_ascii=False)}\n\n")
+                # content_block_delta
+                input_json = json.dumps(tool_input, ensure_ascii=False)
+                chunks.append(f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': idx, 'delta': {'type': 'input_json_delta', 'partial_json': input_json}}, ensure_ascii=False)}\n\n")
+                # content_block_stop
+                chunks.append(f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': idx}, ensure_ascii=False)}\n\n")
+            elif block_type == "thinking":
+                thinking_text = block.get("thinking", "")
+                # content_block_start
+                chunks.append(f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': idx, 'content_block': {'type': 'thinking', 'thinking': ''}}, ensure_ascii=False)}\n\n")
+                # content_block_delta
+                chunks.append(f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': idx, 'delta': {'type': 'thinking_delta', 'thinking': thinking_text}}, ensure_ascii=False)}\n\n")
+                # content_block_stop
+                chunks.append(f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': idx}, ensure_ascii=False)}\n\n")
+
+    # 5. message_delta
+    output_tokens = usage.get("output_tokens", 0) if isinstance(usage, dict) else 0
+    chunks.append(f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': stop_reason}, 'usage': {'output_tokens': output_tokens}}, ensure_ascii=False)}\n\n")
+
+    # 6. message_stop
+    chunks.append(f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'}, ensure_ascii=False)}\n\n")
+
+    return "".join(chunks).encode("utf-8")
+
+
+def _make_streaming_error_sse(error_dict: dict) -> bytes:
+    """在流式 generator 中生成一个错误 SSE chunk。
+
+    不能在 streaming generator 里 raise HTTPException（HTTP 200 header 已发送），
+    只能 yield 一个包含 error 信息的 SSE chunk，让客户端解析错误。
+
+    Anthropic SDK 要求：
+    1. 必须有 `event: error` SSE 行
+    2. data 的 JSON 必须有顶层 `"type": "error"`
+    3. error 对象格式：`{"type": "<error_type>", "message": "..."}`
+    """
+    # 从 error_dict 提取 error 信息
+    err = error_dict.get("error", {})
+    if isinstance(err, dict):
+        err_type = err.get("type", "api_error")
+        err_msg = err.get("message", str(err))
+    else:
+        err_type = "api_error"
+        err_msg = str(err)
+
+    # 映射内部 error type 到 Anthropic 标准 error type
+    type_mapping = {
+        "context_length_exceeded": "invalid_request_error",
+        "rate_limit_exceeded": "rate_limit_error",
+        "workflow_error": "api_error",
+        "provider_error": "api_error",
+        "upstream_error": "api_error",
+        "invalid_request_error": "invalid_request_error",
+    }
+    anthropic_err_type = type_mapping.get(err_type, "api_error")
+
+    sse_event = "event: error\n"
+    sse_data = f"data: {json.dumps({'type': 'error', 'error': {'type': anthropic_err_type, 'message': err_msg}}, ensure_ascii=False)}\n\n"
+    return (sse_event + sse_data).encode("utf-8")
+
+
+def _is_compact_request(body: dict) -> bool:
+    """判断请求是否是 /compact 命令（Claude Code 的上下文压缩请求）。
+
+    /compact 请求应该直接透传给模型，不走 analyze_plan/execute_solve 流程。
+    """
+    messages = body.get("messages", [])
+    for msg in reversed(messages):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            if "/compact" in content:
+                return True
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    if "/compact" in block.get("text", ""):
+                        return True
+        break  # 只检查最后一条 user 消息
+    return False
+
+
+def _estimate_messages_tokens(messages: list) -> int:
+    """估算 messages 的 token 数（简化实现：字符数 / 4）"""
+    total_chars = len(json.dumps(messages, ensure_ascii=False))
+    return total_chars // 4
+
+
+def _truncate_message_content(msg: dict, max_chars: int) -> dict:
+    """截断单条消息内部的内容块，保留最后 max_chars 字符的内容。
+
+    用于处理单条消息包含大量 content blocks 的情况（如 /compact 请求
+    把所有历史对话塞进一条 user 消息的多个 text blocks 中）。
+    """
+    content = msg.get("content", "")
+
+    # 字符串内容：直接截断
+    if isinstance(content, str):
+        if len(content) <= max_chars:
+            return msg
+        return {**msg, "content": content[:max_chars] + "\n\n[... earlier content truncated ...]"}
+
+    # 列表内容：从后往前保留 blocks
+    if isinstance(content, list):
+        kept_chars = 0
+        kept_blocks = []
+        for block in reversed(content):
+            block_chars = len(json.dumps(block, ensure_ascii=False))
+            if kept_chars + block_chars > max_chars and kept_blocks:
+                break
+            kept_blocks.append(block)
+            kept_chars += block_chars
+
+        kept_blocks.reverse()
+
+        if len(kept_blocks) == len(content):
+            return msg
+
+        # 在截断点插入提示 block
+        truncation_block = {
+            "type": "text",
+            "text": "<system-reminder> Earlier conversation history has been truncated to fit context window. The most recent messages are preserved. </system-reminder>"
+        }
+        return {**msg, "content": [truncation_block] + kept_blocks}
+
+    return msg
+
+
+def _truncate_messages(messages: list, max_context: int) -> list:
+    """兜底截断：保留 system + 最后 N 轮对话，砍掉最早的 messages。
+
+    策略：
+    1. 保留所有 system 消息
+    2. 保留最后 N 轮对话（估算 token 不超过 max_context 的 70%）
+    3. 如果单条消息超限，截断该消息内部的内容块
+    4. 在截断点插入一条提示消息说明上下文已被压缩
+    """
+    char_threshold = int(max_context * 0.7 * 4)  # token → 字符（1 token ≈ 4 chars）
+
+    # 分离 system 消息和对话消息
+    system_msgs = []
+    convo_msgs = []
+    for msg in messages:
+        if msg.get("role") == "system":
+            system_msgs.append(msg)
+        else:
+            convo_msgs.append(msg)
+
+    # 从后往前累加，直到超过阈值
+    kept_chars = 0
+    kept_msgs = []
+    for msg in reversed(convo_msgs):
+        msg_chars = len(json.dumps(msg, ensure_ascii=False))
+        if kept_chars + msg_chars > char_threshold and kept_msgs:
+            break
+        # 单条消息本身就超限 → 截断消息内部内容
+        if msg_chars > char_threshold:
+            msg = _truncate_message_content(msg, char_threshold - kept_chars)
+        kept_msgs.append(msg)
+        kept_chars += len(json.dumps(msg, ensure_ascii=False))
+
+    kept_msgs.reverse()
+
+    # 如果没有截断（全部保留），直接返回原始
+    if len(kept_msgs) == len(convo_msgs) and all(
+        len(json.dumps(k, ensure_ascii=False)) == len(json.dumps(o, ensure_ascii=False))
+        for k, o in zip(kept_msgs, convo_msgs)
+    ):
+        return messages
+
+    # 在截断点插入提示（如果 kept_msgs 第一条不是截断提示的话）
+    truncation_notice = {
+        "role": "user",
+        "content": "<system-reminder> Earlier conversation history has been truncated to fit context window. The most recent messages are preserved. </system-reminder>"
+    }
+
+    result = system_msgs + [truncation_notice] + kept_msgs
+    orig_tokens = _estimate_messages_tokens(messages)
+    result_tokens = _estimate_messages_tokens(result)
+    logger.info(f"Truncated messages: {len(messages)} → {len(result)}, tokens ~{orig_tokens} → ~{result_tokens}")
+    return result
 
 
 async def _handle_workflow(request: Request, body: dict, request_id: str) -> Response:
@@ -987,6 +1221,24 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 response.raise_for_status()
                 resp_data = response.json()
 
+                # 检测空响应：HTTP 200 但 content 为空或缺少
+                if isinstance(resp_data, dict):
+                    content = resp_data.get("content", [])
+                    if not content or (isinstance(content, list) and all(
+                        not b.get("text", "").strip() for b in content
+                        if isinstance(b, dict) and b.get("type") == "text"
+                    )):
+                        # 空内容 → 视为失败，让 fallback 重试
+                        logger.warning(f"[{request_id}] {prov_name} returned 200 but empty content, treating as failed")
+                        if _usage_stats:
+                            _usage_stats.record(
+                                provider=prov_name, model=model,
+                                input_tokens=0, output_tokens=0,
+                                latency_ms=(time.time() - start_time) * 1000,
+                                success=False, route_rule=f"workflow.{step_name}",
+                            )
+                        return {"error": {"type": "empty_response", "message": f"{prov_name} returned empty content"}}, False
+
                 # 记录 usage
                 if _usage_stats and isinstance(resp_data, dict):
                     usage = resp_data.get("usage", {})
@@ -1013,6 +1265,25 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 logger.error(f"[{request_id}] {prov_name} returned {e.response.status_code} error: {error_text[:500]}")
             except Exception as log_err:
                 logger.error(f"[{request_id}] Could not read error response: {log_err}")
+
+            # 400 时记录发送的请求体关键字段，帮助诊断 "invalid params"
+            if e.response.status_code == 400:
+                debug_keys = ["model", "max_tokens", "thinking", "tool_choice", "output_config",
+                              "stop_sequences", "temperature", "top_p", "top_k"]
+                debug_info = {k: req_for_provider.get(k) for k in debug_keys if k in req_for_provider}
+                # tools 只记录数量和名称
+                if "tools" in req_for_provider:
+                    tools = req_for_provider["tools"]
+                    debug_info["tools_count"] = len(tools)
+                    debug_info["tool_names"] = [t.get("name","?") for t in tools if isinstance(t, dict)]
+                # system 格式
+                system = req_for_provider.get("system")
+                if system is not None:
+                    if isinstance(system, list):
+                        debug_info["system_format"] = f"list[{len(system)}]"
+                    else:
+                        debug_info["system_format"] = f"str[{len(str(system))}]"
+                logger.warning(f"[{request_id}] {prov_name} 400 request debug: {json.dumps(debug_info, ensure_ascii=False, default=str)}")
 
             # 检查是否是 context length 超限错误 (400)
             if e.response.status_code == 400:
@@ -1081,7 +1352,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
         prov_name, model = parse_provider_model(route_str)
         prov_config = _registry.get(prov_name)
         if not prov_config:
-            yield f"data: {json.dumps({'error': {'type': 'provider_error', 'message': f'Unknown provider: {prov_name}'}}, ensure_ascii=False)}\n\n".encode("utf-8")
+            yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'type': 'api_error', 'message': f'Unknown provider: {prov_name}'}}, ensure_ascii=False)}\n\n".encode("utf-8")
             return
 
         prov_adapter = _get_adapter_for_provider(prov_name)
@@ -1174,10 +1445,30 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
         except HTTPStatusError as e:
             # 记录详细的错误响应信息
             try:
+                # 流式响应不能直接 .text，需要先 aread
+                await e.response.aread()
                 error_text = e.response.text
                 logger.error(f"[{request_id}] {prov_name} streaming returned {e.response.status_code} error: {error_text[:500]}")
             except Exception as log_err:
+                error_text = ""
                 logger.error(f"[{request_id}] Could not read streaming error response: {log_err}")
+
+            # 400 时记录发送的请求体关键字段，帮助诊断 "invalid params"
+            if e.response.status_code == 400:
+                debug_keys = ["model", "max_tokens", "thinking", "tool_choice", "output_config",
+                              "stop_sequences", "temperature", "top_p", "top_k"]
+                debug_info = {k: req_for_provider.get(k) for k in debug_keys if k in req_for_provider}
+                if "tools" in req_for_provider:
+                    tools = req_for_provider["tools"]
+                    debug_info["tools_count"] = len(tools)
+                    debug_info["tool_names"] = [t.get("name","?") for t in tools if isinstance(t, dict)]
+                system = req_for_provider.get("system")
+                if system is not None:
+                    if isinstance(system, list):
+                        debug_info["system_format"] = f"list[{len(system)}]"
+                    else:
+                        debug_info["system_format"] = f"str[{len(str(system))}]"
+                logger.warning(f"[{request_id}] {prov_name} streaming 400 request debug: {json.dumps(debug_info, ensure_ascii=False, default=str)}")
 
             # 检查是否是 context length 超限错误
             if e.response.status_code == 400:
@@ -1185,7 +1476,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                     err_body = e.response.json()
                     err_msg = err_body.get("error", {}).get("message", "") or str(err_body)
                 except Exception:
-                    err_msg = str(e)
+                    err_msg = error_text or str(e)
 
                 token_limit_keywords = [
                     "context length", "token limit", "max tokens",
@@ -1207,12 +1498,11 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                             latency_ms=(time.time() - start_time) * 1000,
                             success=False, route_rule=f"workflow.{step_name}",
                         )
-                    yield f"data: {json.dumps({'error': {'type': 'context_length_exceeded', 'message': user_msg}}, ensure_ascii=False)}\n\n".encode("utf-8")
+                    yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'type': 'invalid_request_error', 'message': user_msg}}, ensure_ascii=False)}\n\n".encode("utf-8")
                     return
 
-            # 429 Too Many Requests
-            if e.response.status_code == 429:
-                logger.warning(f"[{request_id}] Workflow {step_name} hit rate limit (429)")
+                # 非 context 超限的 400 错误（如 invalid params）→ 抛异常让调用方 fallback
+                logger.warning(f"[{request_id}] {prov_name} streaming 400 (not context error): {err_msg[:200]}")
                 if _usage_stats:
                     _usage_stats.record(
                         provider=prov_name, model=model,
@@ -1220,11 +1510,22 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                         latency_ms=(time.time() - start_time) * 1000,
                         success=False, route_rule=f"workflow.{step_name}",
                     )
-                yield f"data: {json.dumps({'error': {'type': 'rate_limit_exceeded', 'message': 'Rate limit exceeded, please try again later'}}, ensure_ascii=False)}\n\n".encode("utf-8")
-                return
+                raise RuntimeError(f"{prov_name} streaming returned 400: {err_msg[:300]}") from e
 
-            logger.warning(f"[{request_id}] Workflow {step_name} streaming failed: {e}")
-            yield f"data: {json.dumps({'error': {'type': 'workflow_error', 'message': str(e)}}, ensure_ascii=False)}\n\n".encode("utf-8")
+            # 429 Too Many Requests → 抛异常让调用方 fallback 到其他 provider
+            if e.response.status_code == 429:
+                logger.warning(f"[{request_id}] Workflow {step_name} hit rate limit (429) from {prov_name}")
+                if _usage_stats:
+                    _usage_stats.record(
+                        provider=prov_name, model=model,
+                        input_tokens=0, output_tokens=0,
+                        latency_ms=(time.time() - start_time) * 1000,
+                        success=False, route_rule=f"workflow.{step_name}",
+                    )
+                raise RuntimeError(f"{prov_name} streaming returned 429 rate limit") from e
+
+            # 其他 HTTP 错误 → 也抛异常让调用方 fallback
+            logger.warning(f"[{request_id}] {prov_name} streaming returned {e.response.status_code}: {error_text[:200]}")
             if _usage_stats:
                 _usage_stats.record(
                     provider=prov_name, model=model,
@@ -1232,10 +1533,11 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                     latency_ms=(time.time() - start_time) * 1000,
                     success=False, route_rule=f"workflow.{step_name}",
                 )
+            raise RuntimeError(f"{prov_name} streaming returned {e.response.status_code}: {error_text[:300]}") from e
 
         except Exception as e:
-            logger.warning(f"[{request_id}] Workflow {step_name} streaming failed: {e}")
-            yield f"data: {json.dumps({'error': {'type': 'workflow_error', 'message': str(e)}}, ensure_ascii=False)}\n\n".encode("utf-8")
+            # 非HTTPStatusError 的其他异常 → 也抛出，让调用方 fallback
+            logger.warning(f"[{request_id}] {prov_name} streaming failed: {e}")
             if _usage_stats:
                 _usage_stats.record(
                     provider=prov_name, model=model,
@@ -1243,6 +1545,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                     latency_ms=(time.time() - start_time) * 1000,
                     success=False, route_rule=f"workflow.{step_name}",
                 )
+            raise
 
     # Step 1: Intention Analysis (基于 keywords.json)
     intent = _detect_workflow_intent(body, _config.keywords)
@@ -1253,6 +1556,48 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
     if is_streaming:
         # 流式处理：每个步骤的结果实时 yield
         async def workflow_stream_generator() -> AsyncGenerator[bytes, None]:
+            is_compact = _is_compact_request(body)
+            if is_compact:
+                # /compact 请求：直接透传给模型压缩上下文，不走 analyze_plan/execute_solve
+                compact_route = _resolve_execute_route(body, request_id)
+                msgs = body.get("messages", [])
+                logger.info(f"[{request_id}] /compact request → direct pass-through to {compact_route}")
+
+                # 预检：估算 token 是否会超限
+                prov_name, _ = compact_route.split(":", 1) if ":" in compact_route else (compact_route, "")
+                prov_config = _registry.get(prov_name)
+                max_context = prov_config.capabilities.get("max_context", 128000) if prov_config else 128000
+                estimated_tokens = _estimate_messages_tokens(msgs)
+
+                if estimated_tokens > max_context:
+                    # 估算超限 → 先截断再发送
+                    truncated_msgs = _truncate_messages(msgs, max_context)
+                    logger.info(
+                        f"[{request_id}] /compact estimated {estimated_tokens} tokens > {max_context} max, "
+                        f"truncating {len(msgs)} → {len(truncated_msgs)} messages"
+                    )
+                    msgs = truncated_msgs
+
+                try:
+                    async for chunk in call_provider_streaming(compact_route, msgs, "compact"):
+                        yield chunk
+                    return
+                except Exception as e:
+                    # /compact 流式失败 → 尝试非流式 fallback
+                    logger.warning(f"[{request_id}] /compact streaming failed: {e}, falling back to non-streaming")
+                    route_result = _routing_engine.route(_classify_request(body))
+                    fallback_routes = [f"{fb[0]}:{fb[1]}" for fb in route_result.fallback_chain]
+                    all_routes = [compact_route] + fallback_routes
+                    resp, _ = await call_provider_with_fallback(all_routes, msgs, "compact")
+                    if isinstance(resp, dict) and "error" not in resp:
+                        yield _wrap_non_streaming_response(resp)
+                    elif isinstance(resp, dict) and "error" in resp:
+                        # streaming 已开始，不能 raise HTTPException，yield error SSE
+                        logger.error(f"[{request_id}] /compact all providers failed: {resp}")
+                        yield _make_streaming_error_sse(resp)
+                    else:
+                        yield _wrap_non_streaming_response(resp)
+
             if is_chat:
                 # 闲聊：直接流式调用 chat_intention
                 async for chunk in call_provider_streaming(
@@ -1279,72 +1624,145 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 preview = str(last_user_text)[:300].replace("\n", " ") if last_user_text else "(no user msg)"
 
                 if is_user_initiated:
-                    # 用户主动输入的 task → 先 analyze_plan (qianfan)，再 execute_solve (minimax)
-                    logger.info(f"[{request_id}] Task (user-initiated) → analyze_plan then execute_solve. Last user msg: {preview}")
+                    # 用户主动输入的 task → 先 analyze_plan (流式)，再 execute_solve (流式)
+                    # 如果 analyze_plan 失败，坍缩为透传模式
+                    logger.info(f"[{request_id}] Task (user-initiated) → analyze_plan (streaming) then execute_solve. Last user msg: {preview}")
 
-                    # Step 2a: analyze_plan - 带 fallback 的非流式调用
-                    analyze_resp, _ = await call_provider_with_fallback(
-                        workflow_config.get_analyze_plan_list(),
-                        msgs,
-                        "analyze_plan"
-                    )
+                    execute_route = _resolve_execute_route(body, request_id)
 
-                    # 检查 analyze_plan 是否失败（HTTP 错误或返回 error dict）
-                    if isinstance(analyze_resp, dict) and "error" in analyze_resp:
-                        err = analyze_resp["error"]
-                        err_msg = err.get("message", str(err))
-                        err_type = err.get("type", "unknown")
-                        logger.warning(
-                            f"[{request_id}] analyze_plan failed (type={err_type}): {err_msg}. "
-                            "Proceeding to execute_solve without analysis context."
+                    # 预检 context window - 80% 阈值自动截断
+                    prov_name, _ = execute_route.split(":", 1) if ":" in execute_route else (execute_route, "")
+                    prov_config = _registry.get(prov_name)
+                    max_context = prov_config.capabilities.get("max_context", 128000) if prov_config else 128000
+                    estimated_tokens = _estimate_messages_tokens(msgs)
+
+                    if estimated_tokens > max_context * 0.8:
+                        msgs = _truncate_messages(msgs, max_context)
+                        logger.info(
+                            f"[{request_id}] Pre-emptive truncation: estimated {estimated_tokens} tokens > {max_context * 0.8:.0f} (80% of {max_context}), "
+                            f"truncating {len(body.get('messages', []))} → {len(msgs)} messages"
                         )
-                        # 继续用原始 messages 执行 execute_solve（不注入分析结果）
-                        analyze_text = ""
-                    else:
-                        logger.info(f"[{request_id}] analyze_plan completed, proceeding to execute_solve")
-                        # 正常提取分析文本
-                        analyze_text = ""
-                        if isinstance(analyze_resp, dict):
-                            analyze_content = analyze_resp.get("content", [])
-                            if isinstance(analyze_content, list):
-                                analyze_text = "".join(
-                                    b.get("text", "") for b in analyze_content
-                                    if isinstance(b, dict) and b.get("type") == "text"
-                                )
-                            elif isinstance(analyze_content, str):
-                                analyze_text = analyze_content
 
-                    # Step 2b: execute_solve - 流式调用 minimax 执行
-                    # 将 analyze_plan 的结果注入 messages 作为额外上下文
-                    if analyze_text:
+                    # Step 2a: analyze_plan - 流式调用
+                    analyze_route = workflow_config.get_analyze_plan_list()[0] if isinstance(workflow_config.get_analyze_plan_list(), list) else workflow_config.get_analyze_plan_list()
+                    analyze_success = False
+                    analyze_text_parts = []
+
+                    try:
+                        async for chunk in call_provider_streaming(analyze_route, msgs, "analyze_plan"):
+                            yield chunk  # 实时返回给 Claude Code
+                            # 收集分析文本（用于后续注入）
+                            chunk_str = chunk.decode("utf-8")
+                            if chunk_str.startswith("data: "):
+                                try:
+                                    data = json.loads(chunk_str[6:])
+                                    if data.get("type") == "message_delta":
+                                        text = data.get("delta", {}).get("text", "")
+                                        if text:
+                                            analyze_text_parts.append(text)
+                                            analyze_success = True
+                                    elif data.get("type") == "content_block_delta":
+                                        text = data.get("delta", {}).get("text", "")
+                                        if text:
+                                            analyze_text_parts.append(text)
+                                            analyze_success = True
+                                except Exception:
+                                    pass
+                    except Exception as e:
+                        logger.warning(f"[{request_id}] analyze_plan streaming failed: {e}, collapsing to passthrough mode")
+                        analyze_success = False
+
+                    # Step 2b: execute_solve - 流式调用
+                    if analyze_success and analyze_text_parts:
+                        analyze_text = "".join(analyze_text_parts)
                         augmented_msgs = list(msgs) + [
                             {"role": "assistant", "content": f"[analyze_plan] {analyze_text}"},
                             {"role": "user", "content": "Based on the above analysis, proceed to execute the solution."},
                         ]
+                        logger.info(f"[{request_id}] analyze_plan succeeded, injecting analysis context into execute_solve")
                     else:
+                        # 坍缩为透传模式
                         augmented_msgs = msgs
+                        logger.info(f"[{request_id}] analyze_plan failed or empty, collapsing to passthrough mode")
 
-                    execute_route = _resolve_execute_route(body, request_id)
-                    async for chunk in call_provider_streaming(
-                        execute_route,
-                        augmented_msgs,
-                        "execute_solve"
-                    ):
-                        yield chunk
+                    try:
+                        async for chunk in call_provider_streaming(
+                            execute_route,
+                            augmented_msgs,
+                            "execute_solve"
+                        ):
+                            yield chunk
+                    except Exception as e:
+                        logger.error(f"[{request_id}] execute_solve streaming failed: {e}")
+                        yield _make_streaming_error_sse({"error": {"type": "provider_error", "message": str(e)}})
                 else:
                     # 工具循环回调 → 直接 execute_solve，不走 analyze_plan
                     logger.info(f"[{request_id}] Task (tool-loop) → execute_solve directly. Last user msg: {preview}")
                     execute_route = _resolve_execute_route(body, request_id)
-                    async for chunk in call_provider_streaming(
-                        execute_route,
-                        body.get("messages", []),
-                        "execute_solve"
-                    ):
-                        yield chunk
+
+                    # 预检 context window - 80% 阈值自动截断
+                    prov_name, _ = execute_route.split(":", 1) if ":" in execute_route else (execute_route, "")
+                    prov_config = _registry.get(prov_name)
+                    max_context = prov_config.capabilities.get("max_context", 128000) if prov_config else 128000
+                    tool_msgs = body.get("messages", [])
+                    estimated_tokens = _estimate_messages_tokens(tool_msgs)
+
+                    if estimated_tokens > max_context * 0.8:
+                        tool_msgs = _truncate_messages(tool_msgs, max_context)
+                        logger.info(
+                            f"[{request_id}] Pre-emptive truncation (tool-loop): estimated {estimated_tokens} tokens > {max_context * 0.8:.0f} (80% of {max_context})"
+                        )
+
+                    try:
+                        async for chunk in call_provider_streaming(
+                            execute_route,
+                            tool_msgs,
+                            "execute_solve"
+                        ):
+                            yield chunk
+                    except Exception as e:
+                        logger.error(f"[{request_id}] execute_solve (tool-loop) streaming failed: {e}")
+                        yield _make_streaming_error_sse({"error": {"type": "provider_error", "message": str(e)}})
 
         return StreamingResponse(workflow_stream_generator(), media_type="text/event-stream")
     else:
         # 非流式处理：收集所有结果后返回
+        is_compact = _is_compact_request(body)
+        if is_compact:
+            # /compact 请求：直接透传给模型，不走 analyze_plan/execute_solve
+            compact_route = _resolve_execute_route(body, request_id)
+            msgs = body.get("messages", [])
+            logger.info(f"[{request_id}] /compact request (non-streaming) → direct pass-through to {compact_route}")
+
+            # 预检：估算 token 是否会超限
+            prov_name, _ = compact_route.split(":", 1) if ":" in compact_route else (compact_route, "")
+            prov_config = _registry.get(prov_name)
+            max_context = prov_config.capabilities.get("max_context", 128000) if prov_config else 128000
+            estimated_tokens = _estimate_messages_tokens(msgs)
+
+            if estimated_tokens > max_context:
+                truncated_msgs = _truncate_messages(msgs, max_context)
+                logger.info(
+                    f"[{request_id}] /compact estimated {estimated_tokens} tokens > {max_context} max, "
+                    f"truncating {len(msgs)} → {len(truncated_msgs)} messages"
+                )
+                msgs = truncated_msgs
+
+            # 非流式 compact 带 fallback chain
+            route_result = _routing_engine.route(_classify_request(body))
+            fallback_routes = [f"{fb[0]}:{fb[1]}" for fb in route_result.fallback_chain]
+            all_routes = [compact_route] + fallback_routes
+
+            resp, _ = await call_provider_with_fallback(all_routes, msgs, "compact")
+
+            # 兜底：如果直通还是超限（预检不准），截断后重试
+            if isinstance(resp, dict) and resp.get("error", {}).get("type") == "context_length_exceeded":
+                logger.info(f"[{request_id}] /compact still exceeded after pre-check, forcing truncation and retry")
+                truncated_msgs = _truncate_messages(msgs, max_context)
+                resp, _ = await call_provider_with_fallback(all_routes, truncated_msgs, "compact_retry")
+
+            return JSONResponse(content=resp)
+
         if is_chat:
             resp, _ = await call_provider(
                 workflow_config.get_chat_intention_single(),
@@ -1356,63 +1774,52 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
             msgs = body.get("messages", [])
 
             if is_user_initiated:
-                # 用户主动输入的 task → 先 analyze_plan (qianfan)，再 execute_solve (minimax)
-                logger.info(f"[{request_id}] Task (user-initiated) → analyze_plan then execute_solve")
-
-                # Step 2a: analyze_plan
-                analyze_resp, _ = await call_provider_with_fallback(
-                    workflow_config.get_analyze_plan_list(),
-                    msgs,
-                    "analyze_plan"
-                )
-
-                # 检查 analyze_plan 是否失败
-                if isinstance(analyze_resp, dict) and "error" in analyze_resp:
-                    err = analyze_resp["error"]
-                    err_msg = err.get("message", str(err))
-                    err_type = err.get("type", "unknown")
-                    logger.warning(
-                        f"[{request_id}] analyze_plan failed (type={err_type}): {err_msg}. "
-                        "Proceeding to execute_solve without analysis context."
-                    )
-                    analyze_text = ""
-                else:
-                    logger.info(f"[{request_id}] analyze_plan completed, proceeding to execute_solve")
-                    analyze_text = ""
-                    if isinstance(analyze_resp, dict):
-                        analyze_content = analyze_resp.get("content", [])
-                        if isinstance(analyze_content, list):
-                            analyze_text = "".join(
-                                b.get("text", "") for b in analyze_content
-                                if isinstance(b, dict) and b.get("type") == "text"
-                            )
-                        elif isinstance(analyze_content, str):
-                            analyze_text = analyze_content
-
-                # Step 2b: execute_solve
-                if analyze_text:
-                    augmented_msgs = list(msgs) + [
-                        {"role": "assistant", "content": f"[analyze_plan] {analyze_text}"},
-                        {"role": "user", "content": "Based on the above analysis, proceed to execute the solution."},
-                    ]
-                else:
-                    augmented_msgs = msgs
+                # 用户主动输入的 task → 非流式模式下直接 execute_solve（不做 analyze_plan）
+                logger.info(f"[{request_id}] Task (user-initiated) → execute_solve (non-streaming)")
 
                 execute_route = _resolve_execute_route(body, request_id)
-                resp, _ = await call_provider(
-                    execute_route,
-                    augmented_msgs,
-                    "execute_solve"
-                )
+
+                # 预检 context window - 80% 阈值自动截断
+                prov_name, _ = execute_route.split(":", 1) if ":" in execute_route else (execute_route, "")
+                prov_config = _registry.get(prov_name)
+                max_context = prov_config.capabilities.get("max_context", 128000) if prov_config else 128000
+                estimated_tokens = _estimate_messages_tokens(msgs)
+
+                if estimated_tokens > max_context * 0.8:
+                    msgs = _truncate_messages(msgs, max_context)
+                    logger.info(
+                        f"[{request_id}] Pre-emptive truncation (non-streaming): estimated {estimated_tokens} tokens > {max_context * 0.8:.0f} (80% of {max_context})"
+                    )
+
+                # 非流式 execute_solve 带 fallback
+                route_result = _routing_engine.route(_classify_request(body))
+                fallback_routes = [f"{fb[0]}:{fb[1]}" for fb in route_result.fallback_chain]
+                all_routes = [execute_route] + fallback_routes
+
+                resp, _ = await call_provider_with_fallback(all_routes, msgs, "execute_solve")
             else:
                 # 工具循环回调 → 直接 execute_solve
-                logger.info(f"[{request_id}] Task (tool-loop) → execute_solve directly")
+                logger.info(f"[{request_id}] Task (tool-loop) → execute_solve directly (non-streaming)")
                 execute_route = _resolve_execute_route(body, request_id)
-                resp, _ = await call_provider(
-                    execute_route,
-                    msgs,
-                    "execute_solve"
-                )
+
+                # 预检 context window - 80% 阈值自动截断
+                prov_name, _ = execute_route.split(":", 1) if ":" in execute_route else (execute_route, "")
+                prov_config = _registry.get(prov_name)
+                max_context = prov_config.capabilities.get("max_context", 128000) if prov_config else 128000
+                estimated_tokens = _estimate_messages_tokens(msgs)
+
+                if estimated_tokens > max_context * 0.8:
+                    msgs = _truncate_messages(msgs, max_context)
+                    logger.info(
+                        f"[{request_id}] Pre-emptive truncation (tool-loop, non-streaming): estimated {estimated_tokens} tokens > {max_context * 0.8:.0f} (80% of {max_context})"
+                    )
+
+                # 非流式 execute_solve 带 fallback
+                route_result = _routing_engine.route(_classify_request(body))
+                fallback_routes = [f"{fb[0]}:{fb[1]}" for fb in route_result.fallback_chain]
+                all_routes = [execute_route] + fallback_routes
+
+                resp, _ = await call_provider_with_fallback(all_routes, msgs, "execute_solve")
 
             if isinstance(resp, dict):
                 content = resp.get("content", [])
@@ -1423,6 +1830,9 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 raise HTTPException(status_code=400, detail=resp)
             if isinstance(resp, dict) and resp.get("error", {}).get("type") == "rate_limit_exceeded":
                 raise HTTPException(status_code=429, detail=resp)
+            # 其他 error 类型也返回 400，避免 HTTP 200 但 body 是 error（Claude Code 会报 malformed response）
+            if isinstance(resp, dict) and "error" in resp and "content" not in resp:
+                raise HTTPException(status_code=400, detail=resp)
             return JSONResponse(content=resp)
 
 
