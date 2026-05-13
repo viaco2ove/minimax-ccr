@@ -33,7 +33,7 @@
 
 ```bash
 # 1. 先启动服务
-run.bat
+run.ccr.bat
 
 # 2. 再启动 Claude Code
 claude

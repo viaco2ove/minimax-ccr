@@ -2,6 +2,7 @@
 https://musistudio.github.io/claude-code-router/zh-CN/docs/
 https://github.com/musistudio/claude-code-router
 D:\Users\viaco\PycharmProjects\claude-code-router
+D:\Users\viaco\PycharmProjects\cc-switch
 
 # minimax 如何对接到claude code 和 codex
 
