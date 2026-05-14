@@ -454,7 +454,7 @@ async def _handle_request(request: Request) -> Response:
 
             # 400 且错误信息表明模型不支持某功能 → 剥离该功能并重试
             if e.response.status_code == 400 and prov_name not in retried_with_stripped:
-                stripped = _strip_unsupported_features(body, error_body)
+                stripped = _strip_unsupported_features(error_body, body)
                 if stripped is not body:
                     retried_with_stripped.add(prov_name)
                     logger.info(f"[{request_id}] {prov_name} doesn't support some features, stripping and retrying")
@@ -639,7 +639,7 @@ async def _handle_streaming_with_fallback(
 
                 # 400 且错误信息表明模型不支持某功能 → 剥离该功能并重试
                 if e.response.status_code == 400 and prov_name not in retried_with_stripped:
-                    stripped = _strip_unsupported_features(original_body, error_body)
+                    stripped = _strip_unsupported_features(error_body, original_body)
                     if stripped is not original_body:
                         retried_with_stripped.add(prov_name)
                         logger.info(f"[{request_id}] {prov_name} doesn't support some features, stripping and retrying")
@@ -676,58 +676,78 @@ async def _handle_streaming_with_fallback(
     return StreamingResponse(stream_generator(), media_type="text/event-stream")
 
 
-def _strip_unsupported_features(body: dict, error_body: str) -> dict:
-    """根据 upstream 400 错误信息，剥离请求中不支持的功能
+def _strip_unsupported_features(error_msg: str, req_for_provider: dict) -> dict:
+    """根据 upstream 400 错误信息和当前请求，剥离可能导致 400 的功能
 
-    检测常见的不支持错误：
-    - image_url / image 不支持 -> 剥离图片内容块
-    - thinking 不支持 -> 剥离 thinking 字段
-    - output_config.effort 无效 -> 修正或删除 output_config
-    返回修改后的 body；如果不需要修改则返回原 body。
+    直接基于请求字段进行剥离，适用于 call_provider_streaming 的重试逻辑。
+    对于 codeplan_anthropic 协议，额外清理可能导致 400 的字段：
+    - thinking 字段可能导致 "thinking not supported" 错误
+    - output_config 可能导致 "output_config.effort" 相关错误
+    - tool_choice 的 any/tool 类型可能不被支持
     """
-    changed = False
-    result = body
+    result = dict(req_for_provider)
+
+    # 优先根据错误信息进行针对性剥离
+    error_lower = error_msg.lower()
 
     # 检测图片相关不支持错误
-    image_keywords = ["image_url", "image content", "vision", "not supported by certain models"]
-    if any(kw.lower() in error_body.lower() for kw in image_keywords):
+    image_keywords = ["image_url", "image content", "vision", "not supported by certain models", "image block"]
+    if any(kw in error_lower for kw in image_keywords):
         result = _strip_image_blocks(result)
-        if result is not body:
-            changed = True
 
     # 检测 thinking 相关不支持错误
-    thinking_keywords = ["thinking", "extended thinking", "thinking_mode"]
-    if any(kw.lower() in error_body.lower() for kw in thinking_keywords):
+    thinking_keywords = ["thinking", "extended thinking", "thinking_mode", "not support thinking"]
+    if any(kw in error_lower for kw in thinking_keywords):
         if "thinking" in result:
             result = dict(result)
             del result["thinking"]
-            changed = True
 
     # 检测 output_config.effort 相关错误
     effort_keywords = ["output_config.effort", "effort", "xhigh"]
-    if any(kw.lower() in error_body.lower() for kw in effort_keywords):
+    if any(kw in error_lower for kw in effort_keywords):
         if "output_config" in result:
             result = dict(result)
-            output_config = result["output_config"]
-            if isinstance(output_config, dict) and "effort" in output_config:
-                # 尝试修正 effort 值
-                effort = output_config["effort"]
+            if isinstance(result["output_config"], dict) and "effort" in result["output_config"]:
+                effort = result["output_config"]["effort"]
                 valid_efforts = {"low", "medium", "high", "max"}
                 if effort not in valid_efforts:
-                    result["output_config"] = dict(output_config)
+                    result["output_config"] = dict(result["output_config"])
                     if effort == "xhigh":
                         result["output_config"]["effort"] = "high"
                     else:
                         result["output_config"]["effort"] = "medium"
-                    changed = True
                 else:
-                    # 如果值已经是有效的但仍然报错，尝试删除整个 output_config
                     del result["output_config"]
-                    changed = True
             else:
-                # 如果不是 dict 或没有 effort，删除 output_config
                 del result["output_config"]
-                changed = True
+
+    # 对于 codeplan_anthropic 协议，额外做预防性剥离
+    # 因为 400 错误可能是由 provider 不支持的 Claude Code 特有参数导致的
+    protocol = req_for_provider.get("protocol", "")
+    if protocol in ("codeplan_anthropic", "mmx"):
+        # 预防性剥离 thinking（MiniMax 等 provider 的 codeplan 接口可能不支持）
+        if "thinking" in result:
+            result = dict(result)
+            del result["thinking"]
+
+        # 清理 tool_choice
+        if "tool_choice" in result:
+            tc = result["tool_choice"]
+            if isinstance(tc, dict):
+                tc_type = tc.get("type", "")
+                if tc_type in ("any", "tool"):
+                    result = dict(result)
+                    result["tool_choice"] = {"type": "auto"}
+
+        # 确保 max_tokens 不超过 32K
+        if "max_tokens" in result:
+            try:
+                current_max = int(result["max_tokens"])
+                if current_max > 32000:
+                    result = dict(result)
+                    result["max_tokens"] = 32000
+            except (ValueError, TypeError):
+                pass
 
     return result
 
@@ -1122,7 +1142,8 @@ def _truncate_message_content(msg: dict, max_chars: int) -> dict:
         kept_chars = 0
         kept_blocks = []
         for block in reversed(content):
-            block_chars = len(json.dumps(block, ensure_ascii=False))
+            block_str = json.dumps(block, ensure_ascii=False)
+            block_chars = len(block_str)
             if kept_chars + block_chars > max_chars and kept_blocks:
                 break
             kept_blocks.append(block)
@@ -1133,12 +1154,12 @@ def _truncate_message_content(msg: dict, max_chars: int) -> dict:
         if len(kept_blocks) == len(content):
             return msg
 
-        # 在截断点插入提示 block
+        # 在截断点插入提示 block（插入到 kept_blocks 开头，而非 msg 开头）
         truncation_block = {
             "type": "text",
             "text": "<system-reminder> Earlier conversation history has been truncated to fit context window. The most recent messages are preserved. </system-reminder>"
         }
-        return {**msg, "content": [truncation_block] + kept_blocks}
+        return {**msg, "content": kept_blocks + [truncation_block]}
 
     return msg
 
@@ -1409,8 +1430,13 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 )
             return {"error": {"type": "workflow_error", "message": str(e)}}, False
 
+    # 本次调用的上下文（用于重试逻辑）
+    local_req_body = [dict(body)]  # 用列表包装以便在闭包中修改
+    retried_strip = False  # 本次调用是否已尝试过剥离
+
     async def call_provider_streaming(route_str: str, messages: list, step_name: str) -> AsyncGenerator[bytes, None]:
         """流式调用 provider，实时 yield 每个 chunk"""
+        nonlocal local_req_body, retried_strip
         prov_name, model = parse_provider_model(route_str)
         prov_config = _registry.get(prov_name)
         if not prov_config:
@@ -1419,8 +1445,9 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
 
         prov_adapter = _get_adapter_for_provider(prov_name)
 
-        # 构建请求
-        req_body = dict(body)
+        # 构建请求（使用可能已更新的 local_req_body）
+        req_body = local_req_body[0]
+        req_body = dict(req_body)
         req_body["messages"] = messages
         req_body["model"] = model
         req_body["stream"] = True
@@ -1445,7 +1472,15 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
         if isinstance(first_user, list):
             first_user = next((c["text"] for c in first_user if c.get("type") == "text"), None)
         preview = str(first_user)[:250].replace("\n", " ") if first_user else "(no user msg)"
-        logger.debug(f"[{request_id}] → [{prov_name}] req: model={model}, stream=True, first_user={preview}")
+
+        # Debug: 打印更多请求信息
+        if logger.isEnabledFor(logging.DEBUG):
+            req_body_len = len(json.dumps(req_for_provider, ensure_ascii=False))
+            msgs_len = len(json.dumps(messages, ensure_ascii=False))
+            msgs_tokens = msgs_len // 4
+            logger.debug(f"[{request_id}] → [{prov_name}] req: model={model}, stream=True, req_len={req_body_len}, msgs_len={msgs_len}, msgs_tokens~{msgs_tokens}, first_user={preview}")
+        else:
+            logger.debug(f"[{request_id}] → [{prov_name}] req: model={model}, stream=True, first_user={preview}")
 
         logger.info(f"[{request_id}] Workflow {step_name} streaming: {prov_name} at {prov_target_url}")
 
@@ -1553,6 +1588,18 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                         debug_info["system_format"] = f"list[{len(system)}]"
                     else:
                         debug_info["system_format"] = f"str[{len(str(system))}]"
+
+                # Debug: 打印完整的 curl 命令
+                if logger.isEnabledFor(logging.DEBUG):
+                    # 构建 curl 命令（隐藏 api_key）
+                    masked_headers = dict(prov_headers)
+                    if "Authorization" in masked_headers:
+                        masked_headers["Authorization"] = "Bearer ***"
+                    curl_cmd = f"curl -X POST '{prov_target_url}' \\\n  -H 'Content-Type: application/json' \\\n  -H 'Authorization: Bearer ***' \\\n  -H 'anthropic-version: 2023-06-01' \\\n  -d '{json.dumps(req_for_provider, ensure_ascii=False)[:2000]}...'"
+                    logger.debug(f"[{request_id}] {prov_name} 400 curl cmd:\n{curl_cmd}")
+                    # 打印请求完整 JSON
+                    logger.debug(f"[{request_id}] {prov_name} 400 full req:\n{json.dumps(req_for_provider, ensure_ascii=False, indent=2)[:3000]}")
+
                 logger.warning(f"[{request_id}] {prov_name} streaming 400 request debug: {json.dumps(debug_info, ensure_ascii=False, default=str)}")
 
             # 检查是否是 context length 超限错误
@@ -1586,7 +1633,18 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                     yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'type': 'invalid_request_error', 'message': user_msg}}, ensure_ascii=False)}\n\n".encode("utf-8")
                     return
 
-                # 非 context 超限的 400 错误（如 invalid params）→ 抛异常让调用方 fallback
+                # 非 context 超限的 400 错误（如 invalid params）
+                # 尝试剥离不支持的功能并重试（每个 provider 只重试一次）
+                if not retried_strip:
+                    stripped = _strip_unsupported_features(err_msg, req_for_provider)
+                    if stripped is not req_for_provider:
+                        retried_strip = True
+                        logger.info(f"[{request_id}] {prov_name} doesn't support some features, stripping and retrying")
+                        # 更新 local_req_body 用于下次重试
+                        local_req_body[0] = stripped
+                        # 不抛异常，正常结束 except 块，下次循环会重试
+                        return
+
                 # 打印完整响应体供调试（error_text 在上面 aread() 时已读取）
                 err_body_str = error_text if error_text else str(e)
                 logger.warning(f"[{request_id}] {prov_name} streaming 400 response body: {err_body_str[:500]}")
@@ -1676,25 +1734,20 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
 
         msgs = body.get("messages", [])
 
+        # Debug: 打印请求详情和路由信息
+        if logger.isEnabledFor(logging.DEBUG):
+            msgs_chars = len(json.dumps(msgs, ensure_ascii=False))
+            msgs_tokens = msgs_chars // 4
+            logger.debug(f"[{request_id}] Request stats: msgs_chars={msgs_chars}, msgs_tokens~{msgs_tokens}, msgs_count={len(msgs)}")
+            # 打印路由决策
+            logger.debug(f"[{request_id}] Routing: stage={stage}, intent={intent}, user_initiated={is_user_initiated}")
+            logger.debug(f"[{request_id}] Route list: {route_list}")
+
         # /compact 请求特殊处理
         is_compact = _is_compact_request(body)
         if is_compact:
             logger.info(f"[{request_id}] /compact request → direct pass-through, overriding stage to execute_solve")
             route_list, step_name = _get_stage_routes("execute_solve", body)
-
-        # 预检 context window - 80% 阈值自动截断
-        first_route = route_list[0] if route_list else "minimax:MiniMax-M2.7"
-        prov_name, _ = first_route.split(":", 1) if ":" in first_route else (first_route, "")
-        prov_config = _registry.get(prov_name)
-        max_context = prov_config.capabilities.get("max_context", 128000) if prov_config else 128000
-        estimated_tokens = _estimate_messages_tokens(msgs)
-
-        if estimated_tokens > max_context * 0.8:
-            msgs = _truncate_messages(msgs, max_context)
-            logger.info(
-                f"[{request_id}] Pre-emptive truncation: estimated {estimated_tokens} tokens > {max_context * 0.8:.0f} (80% of {max_context}), "
-                f"truncating {len(body.get('messages', []))} → {len(msgs)} messages"
-            )
 
         # 4. 流式调用 provider（带 fallback）
         success = False
