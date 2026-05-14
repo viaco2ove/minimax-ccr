@@ -566,13 +566,6 @@ async def _handle_streaming_with_fallback(
             req_for_provider = prov_adapter.transform_request(original_body, provider_config_to_dict(prov_config))
             req_for_provider["model"] = model
 
-            # minimax 对 system 字符串有 8000 字符限制，超出会返回 400 invalid params
-            if prov_name == "minimax" and "system" in req_for_provider and isinstance(req_for_provider["system"], str):
-                system_str = req_for_provider["system"]
-                if len(system_str) > 7000:
-                    logger.warning(f"[{request_id}] minimax system string {len(system_str)} chars exceeds 7000 limit, truncating to 7000")
-                    req_for_provider["system"] = system_str[:7000]
-
             target_url = prov_adapter.get_target_url(provider_config_to_dict(prov_config), model)
             if not target_url.startswith("http"):
                 target_url = f"http://{target_url}"
@@ -1253,13 +1246,6 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
         req_for_provider = prov_adapter.transform_request(req_body, _provider_config_to_dict(prov_config))
         req_for_provider["model"] = model
 
-        # minimax 对 system 字符串有 8000 字符限制，超出会返回 400 invalid params
-        if prov_name == "minimax" and "system" in req_for_provider and isinstance(req_for_provider["system"], str):
-            system_str = req_for_provider["system"]
-            if len(system_str) > 7000:
-                logger.warning(f"[{request_id}] minimax system string {len(system_str)} chars exceeds 7000 limit, truncating to 7000")
-                req_for_provider["system"] = system_str[:7000]
-
         prov_target_url = prov_adapter.get_target_url(_provider_config_to_dict(prov_config), model)
         if not prov_target_url.startswith("http"):
             prov_target_url = f"http://{prov_target_url}"
@@ -1441,13 +1427,6 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
 
         req_for_provider = prov_adapter.transform_request(req_body, _provider_config_to_dict(prov_config))
         req_for_provider["model"] = model
-
-        # minimax 对 system 字符串有 8000 字符限制，超出会返回 400 invalid params
-        if prov_name == "minimax" and "system" in req_for_provider and isinstance(req_for_provider["system"], str):
-            system_str = req_for_provider["system"]
-            if len(system_str) > 7000:
-                logger.warning(f"[{request_id}] minimax system string {len(system_str)} chars exceeds 7000 limit, truncating to 7000")
-                req_for_provider["system"] = system_str[:7000]
 
         prov_target_url = prov_adapter.get_target_url(_provider_config_to_dict(prov_config), model)
         if not prov_target_url.startswith("http"):
