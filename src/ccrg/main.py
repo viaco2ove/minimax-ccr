@@ -876,16 +876,27 @@ def _resolve_execute_route(body: dict, request_id: str) -> str:
         return _config.workflow.get_execute_solve_single()
 
 
-def _get_stage_routes(stage: str) -> tuple[list[str], str]:
+def _get_stage_routes(stage: str, body: dict = None) -> tuple[list[str], str]:
     """根据 workflow 阶段获取路由列表和步骤名
     
     Args:
         stage: workflow 阶段名称（intention_analyze/chat_intention/analyze_plan/execute_solve）
+        body: 原始请求体（用于 scenario 检测）
     
     Returns:
         (route_list, step_name): 路由列表（包含 fallback）和步骤名
     """
     global _config
+    
+    # 优先检查 scenario：如果有图片，直接走 mmx
+    if body:
+        tags = _classify_request(body)
+        if tags.scenario == "image":
+            image_config = _config.routing.get("scenarios", {}).get("image", {})
+            route = image_config.get("route", "mmx:MiniMax-M2.7")
+            fallback = image_config.get("fallback", [])
+            logger.info(f"Image scenario detected, routing to {route}")
+            return [route] + fallback, "image"
     
     if stage == "intention_analyze":
         return _config.workflow.get_intention_analyze_list(), "intention_analyze"
@@ -1615,7 +1626,8 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 metadata = {}
         
         stage = metadata.get("workflow_stage")
-        
+        logger.debug(f"metadata workflow_stage {metadata}")
+
         # 2. 如果没有标注，自动判断（向后兼容）
         if not stage:
             intent = _detect_workflow_intent(body, _config.keywords)
@@ -1634,7 +1646,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
             logger.info(f"[{request_id}] Workflow stage (from metadata): {stage}")
 
         # 3. 根据阶段选择路由和 fallback
-        route_list, step_name = _get_stage_routes(stage)
+        route_list, step_name = _get_stage_routes(stage, body)
 
         msgs = body.get("messages", [])
 
@@ -1642,7 +1654,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
         is_compact = _is_compact_request(body)
         if is_compact:
             logger.info(f"[{request_id}] /compact request → direct pass-through, overriding stage to execute_solve")
-            route_list, step_name = _get_stage_routes("execute_solve")
+            route_list, step_name = _get_stage_routes("execute_solve", body)
 
         # 预检 context window - 80% 阈值自动截断
         first_route = route_list[0] if route_list else "minimax:MiniMax-M2.7"

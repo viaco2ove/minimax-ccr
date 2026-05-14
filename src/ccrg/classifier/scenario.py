@@ -77,16 +77,13 @@ class ScenarioClassifier:
         return False
 
     def _has_image_content(self, request: dict) -> bool:
-        """检查请求中是否包含图片"""
-        # 检查 system
-        system = request.get("system", [])
-        if isinstance(system, list):
-            for item in system:
-                if isinstance(item, dict) and item.get("type") == "image":
-                    return True
+        """检查最后一条用户消息是否包含图片（不检查历史消息）"""
+        messages = request.get("messages", [])
 
-        # 检查 messages
-        for msg in request.get("messages", []):
+        # 只检查最后一条 user 消息
+        for msg in reversed(messages):
+            if msg.get("role") != "user":
+                continue
             content = msg.get("content", [])
             if isinstance(content, list):
                 for block in content:
@@ -94,6 +91,7 @@ class ScenarioClassifier:
                         return True
             elif isinstance(content, dict) and content.get("type") == "image":
                 return True
+            break  # 只检查最后一条 user 消息
 
         return False
 
