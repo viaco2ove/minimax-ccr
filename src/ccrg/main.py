@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from .config import load_config
-from .protocol import AnthropicAdapter, OpenAIAdapter, ProtocolAdapter
+from .protocol import AnthropicAdapter, OpenAIAdapter, MiniMaxAdapter, ProtocolAdapter
 from .classifier.scenario import ScenarioClassifier
 from .classifier.tool_type import ToolTypeClassifier
 from .classifier.keyword import KeywordClassifier
@@ -399,6 +399,7 @@ async def _handle_request(request: Request) -> Response:
             prov_headers = {
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {prov_config.api_key}",
+                "anthropic-version": "2023-06-01",
             }
 
             # 获取 provider 对应的超时时间
@@ -564,6 +565,13 @@ async def _handle_streaming_with_fallback(
             # 为每个 provider 重新转换原始请求（不同协议需要不同格式）
             req_for_provider = prov_adapter.transform_request(original_body, provider_config_to_dict(prov_config))
             req_for_provider["model"] = model
+
+            # minimax 对 system 字符串有 8000 字符限制，超出会返回 400 invalid params
+            if prov_name == "minimax" and "system" in req_for_provider and isinstance(req_for_provider["system"], str):
+                system_str = req_for_provider["system"]
+                if len(system_str) > 7000:
+                    logger.warning(f"[{request_id}] minimax system string {len(system_str)} chars exceeds 7000 limit, truncating to 7000")
+                    req_for_provider["system"] = system_str[:7000]
 
             target_url = prov_adapter.get_target_url(provider_config_to_dict(prov_config), model)
             if not target_url.startswith("http"):
@@ -765,6 +773,7 @@ def _provider_config_to_dict(provider: ProviderConfig) -> dict:
         "api_base_url": provider.api_base_url,
         "api_key": provider.api_key,
         "protocol": provider.protocol,
+        "providers_adapter": provider.providers_adapter,
         "models": provider.models,
         "capabilities": provider.capabilities,
         "cost_tier": provider.cost_tier,
@@ -775,11 +784,25 @@ def _provider_config_to_dict(provider: ProviderConfig) -> dict:
 
 
 def _get_adapter_for_provider(provider_name: str) -> ProtocolAdapter:
-    """获取 provider 对应的 adapter"""
+    """获取 provider 对应的 adapter
+
+    优先使用 provider config 中的 providers_adapter 字段，
+    其次根据 protocol 字段选择默认 adapter。
+    """
     provider = _registry.get(provider_name)
     if not provider:
         return AnthropicAdapter()
 
+    # 优先使用 providers_adapter 配置
+    adapter_name = provider.providers_adapter
+    if adapter_name == "minimax":
+        return MiniMaxAdapter()
+    elif adapter_name == "openai":
+        return OpenAIAdapter()
+    elif adapter_name == "anthropic":
+        return AnthropicAdapter()
+
+    # 回退到 protocol 字段
     if provider.protocol == "codeplan_anthropic":
         return AnthropicAdapter()
     elif provider.protocol == "chat_openai":
@@ -1230,6 +1253,13 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
         req_for_provider = prov_adapter.transform_request(req_body, _provider_config_to_dict(prov_config))
         req_for_provider["model"] = model
 
+        # minimax 对 system 字符串有 8000 字符限制，超出会返回 400 invalid params
+        if prov_name == "minimax" and "system" in req_for_provider and isinstance(req_for_provider["system"], str):
+            system_str = req_for_provider["system"]
+            if len(system_str) > 7000:
+                logger.warning(f"[{request_id}] minimax system string {len(system_str)} chars exceeds 7000 limit, truncating to 7000")
+                req_for_provider["system"] = system_str[:7000]
+
         prov_target_url = prov_adapter.get_target_url(_provider_config_to_dict(prov_config), model)
         if not prov_target_url.startswith("http"):
             prov_target_url = f"http://{prov_target_url}"
@@ -1237,6 +1267,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
         prov_headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {prov_config.api_key}",
+            "anthropic-version": "2023-06-01",
         }
 
         prov_timeout = (prov_config.timeout_ms or _config.server.get("timeout_ms", 600000)) / 1000
@@ -1411,6 +1442,13 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
         req_for_provider = prov_adapter.transform_request(req_body, _provider_config_to_dict(prov_config))
         req_for_provider["model"] = model
 
+        # minimax 对 system 字符串有 8000 字符限制，超出会返回 400 invalid params
+        if prov_name == "minimax" and "system" in req_for_provider and isinstance(req_for_provider["system"], str):
+            system_str = req_for_provider["system"]
+            if len(system_str) > 7000:
+                logger.warning(f"[{request_id}] minimax system string {len(system_str)} chars exceeds 7000 limit, truncating to 7000")
+                req_for_provider["system"] = system_str[:7000]
+
         prov_target_url = prov_adapter.get_target_url(_provider_config_to_dict(prov_config), model)
         if not prov_target_url.startswith("http"):
             prov_target_url = f"http://{prov_target_url}"
@@ -1418,6 +1456,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
         prov_headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {prov_config.api_key}",
+            "anthropic-version": "2023-06-01",
         }
 
         prov_timeout = (prov_config.timeout_ms or _config.server.get("timeout_ms", 600000)) / 1000
@@ -1506,13 +1545,18 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
 
         except HTTPStatusError as e:
             # 记录详细的错误响应信息
+            error_text = ""
             try:
                 # 流式响应不能直接 .text，需要先 aread
                 await e.response.aread()
                 error_text = e.response.text
                 logger.error(f"[{request_id}] {prov_name} streaming returned {e.response.status_code} error: {error_text[:500]}")
             except Exception as log_err:
-                error_text = ""
+                # aread 失败，尝试直接从 response 拿 content
+                try:
+                    error_text = e.response.content.decode("utf-8", errors="replace")
+                except Exception:
+                    error_text = f"(stream read failed: {log_err})"
                 logger.error(f"[{request_id}] Could not read streaming error response: {log_err}")
 
             # 400 时记录发送的请求体关键字段，帮助诊断 "invalid params"
@@ -1564,14 +1608,10 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                     return
 
                 # 非 context 超限的 400 错误（如 invalid params）→ 抛异常让调用方 fallback
-                # 打印完整响应体供调试
-                try:
-                    err_body = e.response.json()
-                    err_body_str = json.dumps(err_body, ensure_ascii=False, default=str)
-                except Exception:
-                    err_body_str = error_text or str(e)
-                logger.warning(f"[{request_id}] {prov_name} streaming 400 response body: {err_body_str}")
-                logger.warning(f"[{request_id}] {prov_name} streaming 400 (not context error): {err_msg[:200]}")
+                # 打印完整响应体供调试（error_text 在上面 aread() 时已读取）
+                err_body_str = error_text if error_text else str(e)
+                logger.warning(f"[{request_id}] {prov_name} streaming 400 response body: {err_body_str[:500]}")
+                logger.warning(f"[{request_id}] {prov_name} streaming 400 (not context error): {(error_text[:200] if error_text else str(e)[:200])}")
                 if _usage_stats:
                     _usage_stats.record(
                         provider=prov_name, model=model,
