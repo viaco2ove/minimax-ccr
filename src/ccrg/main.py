@@ -1564,6 +1564,13 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                     return
 
                 # 非 context 超限的 400 错误（如 invalid params）→ 抛异常让调用方 fallback
+                # 打印完整响应体供调试
+                try:
+                    err_body = e.response.json()
+                    err_body_str = json.dumps(err_body, ensure_ascii=False, default=str)
+                except Exception:
+                    err_body_str = error_text or str(e)
+                logger.warning(f"[{request_id}] {prov_name} streaming 400 response body: {err_body_str}")
                 logger.warning(f"[{request_id}] {prov_name} streaming 400 (not context error): {err_msg[:200]}")
                 if _usage_stats:
                     _usage_stats.record(
