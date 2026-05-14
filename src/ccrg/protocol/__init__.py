@@ -3,5 +3,6 @@
 from .base import ProtocolAdapter
 from .anthropic_adapter import AnthropicAdapter
 from .openai_adapter import OpenAIAdapter
+from .minimax_adapter import MiniMaxAdapter
 
-__all__ = ["ProtocolAdapter", "AnthropicAdapter", "OpenAIAdapter"]
+__all__ = ["ProtocolAdapter", "AnthropicAdapter", "OpenAIAdapter", "MiniMaxAdapter"]
