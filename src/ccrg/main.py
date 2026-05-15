@@ -749,6 +749,9 @@ def _strip_unsupported_features(error_msg: str, req_for_provider: dict) -> dict:
             except (ValueError, TypeError):
                 pass
 
+    # 清理 messages 中的空 text blocks 和 thinking blocks（预防性剥离）
+    result = _strip_empty_and_unsupported_blocks(result)
+
     return result
 
 
@@ -770,6 +773,45 @@ def _strip_image_blocks(body: dict) -> dict:
                     new_content.append({"type": "text", "text": "[image]"})
                 else:
                     new_content.append(block)
+            if changed:
+                msg = dict(msg, content=new_content)
+        new_messages.append(msg)
+
+    if changed:
+        return dict(body, messages=new_messages)
+    return body
+
+
+def _strip_empty_and_unsupported_blocks(body: dict) -> dict:
+    """清理消息中的空 text blocks 和 thinking blocks"""
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return body
+
+    changed = False
+    new_messages = []
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            new_content = []
+            for block in content:
+                if not isinstance(block, dict):
+                    new_content.append(block)
+                    continue
+                block_type = block.get("type", "")
+                # 跳过空 text block
+                if block_type == "text":
+                    text = block.get("text", "")
+                    if text and text.strip():
+                        new_content.append(block)
+                    else:
+                        changed = True
+                    continue
+                # 跳过 thinking block（MiniMax 等不支持）
+                if block_type == "thinking":
+                    changed = True
+                    continue
+                new_content.append(block)
             if changed:
                 msg = dict(msg, content=new_content)
         new_messages.append(msg)
@@ -1566,13 +1608,18 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 error_text = e.response.text
                 logger.error(f"[{request_id}] {prov_name} streaming returned {e.response.status_code} error: {error_text[:500]}")
             except Exception as log_err:
-                # aread 失败，尝试直接从 response 拿 content
-                try:
-                    error_text = e.response.content.decode("utf-8", errors="replace")
-                    logger.error(f"[{request_id}] {prov_name} streaming 400, content from .content: {error_text[:500]}")
-                except Exception:
-                    error_text = f"(stream read failed: {log_err})"
-                    logger.error(f"[{request_id}] Could not read streaming error response: {log_err}")
+                # aread 失败，尝试从异常消息中提取 error body
+                error_text = str(e)
+                # 尝试提取 body 部分（格式: "...body b'...'")
+                import re
+                body_match = re.search(r"body b'(.*?)'", error_text)
+                if body_match:
+                    import base64
+                    try:
+                        error_text = body_match.group(1).encode().decode("unicode_escape")
+                    except Exception:
+                        pass
+                logger.error(f"[{request_id}] {prov_name} streaming {e.response.status_code}, err from exception: {error_text[:500]}")
 
             # 400 时记录发送的请求体关键字段，帮助诊断 "invalid params"
             if e.response.status_code == 400:
@@ -1760,9 +1807,10 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 async for chunk in call_provider_streaming(try_route, msgs, step_name):
                     yield chunk
                     success = True  # 至少成功 yield 了一个 chunk
+                # async for 正常结束（无异常）→ provider 成功，不再尝试下一个
                 if success:
                     logger.info(f"[{request_id}] {step_name} succeeded with {try_route}")
-                    break
+                    return  # 直接返回，不继续尝试其他 provider
             except Exception as e:
                 last_error = e
                 # 检测是否是 rate limit 错误
