@@ -1569,9 +1569,10 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 # aread 失败，尝试直接从 response 拿 content
                 try:
                     error_text = e.response.content.decode("utf-8", errors="replace")
+                    logger.error(f"[{request_id}] {prov_name} streaming 400, content from .content: {error_text[:500]}")
                 except Exception:
                     error_text = f"(stream read failed: {log_err})"
-                logger.error(f"[{request_id}] Could not read streaming error response: {log_err}")
+                    logger.error(f"[{request_id}] Could not read streaming error response: {log_err}")
 
             # 400 时记录发送的请求体关键字段，帮助诊断 "invalid params"
             if e.response.status_code == 400:
@@ -1752,6 +1753,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
         # 4. 流式调用 provider（带 fallback）
         success = False
         last_error = None
+        last_error_type = "provider_error"
         for try_route in route_list:
             try:
                 logger.info(f"[{request_id}] Trying {try_route} for {step_name}")
@@ -1763,6 +1765,11 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                     break
             except Exception as e:
                 last_error = e
+                # 检测是否是 rate limit 错误
+                if "429" in str(e) or "rate limit" in str(e).lower():
+                    last_error_type = "rate_limit_exceeded"
+                elif "context length" in str(e).lower():
+                    last_error_type = "context_length_exceeded"
                 logger.warning(f"[{request_id}] {try_route} failed for {step_name}: {e}, trying next...")
                 success = False
                 continue
@@ -1770,7 +1777,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
         if not success:
             error_msg = str(last_error) if last_error else f"All {len(route_list)} providers failed for {step_name}"
             logger.error(f"[{request_id}] {error_msg}")
-            yield _make_streaming_error_sse({"error": {"type": "provider_error", "message": error_msg}})
+            yield _make_streaming_error_sse({"error": {"type": last_error_type, "message": error_msg}})
 
     return StreamingResponse(workflow_stream_generator(), media_type="text/event-stream")
 
