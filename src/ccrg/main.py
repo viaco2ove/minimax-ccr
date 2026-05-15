@@ -1538,27 +1538,32 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 await asyncio.sleep(sleep_time)
             _provider_last_request_time[prov_name] = time.time()
 
-        # Debug: 打印完整的 curl 命令（每次请求都打印，不只是 400 时）
+        # Debug: 保存完整请求体到文件，curl 用 @file 引用（避免 truncate）
         if logger.isEnabledFor(logging.DEBUG):
-            masked_headers = dict(prov_headers)
-            if "Authorization" in masked_headers:
-                masked_headers["Authorization"] = "Bearer ***"
-            body_preview = json.dumps(req_for_provider, ensure_ascii=False)
-            if len(body_preview) > 2000:
-                body_preview = body_preview[:2000] + "...(truncated)"
+            req_dir = Path("logs/req")
+            req_dir.mkdir(parents=True, exist_ok=True)
+            req_file = req_dir / f"{request_id}_{prov_name}.json"
+            with open(req_file, "w", encoding="utf-8") as f:
+                json.dump(req_for_provider, f, ensure_ascii=False)
             curl_cmd = (
                 f"curl -X POST '{prov_target_url}' \\\n"
                 f"  -H 'Content-Type: application/json' \\\n"
                 f"  -H 'Authorization: Bearer ***' \\\n"
                 f"  -H 'anthropic-version: 2023-06-01' \\\n"
-                f"  -d '{body_preview}'"
+                f"  -d @logs/req/{req_file.name}"
             )
-            logger.debug(f"[FallbackRouter] [REQ] [CURL] [{prov_name}]:\n{curl_cmd}")
+            logger.debug(f"[FallbackRouter] [REQ] [CURL] [{prov_name}]: {req_file} (chars={len(json.dumps(req_for_provider, ensure_ascii=False))})\n{curl_cmd}")
 
         try:
             async with httpx.AsyncClient(timeout=prov_timeout) as client:
                 async with client.stream("POST", prov_target_url, json=req_for_provider, headers=prov_headers) as response:
                     response.raise_for_status()
+
+                    # Debug: 追踪响应内容用于日志
+                    resp_first_chunk = None
+                    resp_last_chunk = None
+                    resp_chunk_count = 0
+                    resp_raw_lines = []  # 保存前几条原始行用于调试
 
                     # 根据 provider 类型选择 converter
                     converter = None
@@ -1583,10 +1588,20 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                                 raw_chunk = line.encode("utf-8")
                                 events = converter.convert_chunk(raw_chunk)
                                 for event in events:
+                                    # Debug: 追踪响应内容
+                                    if resp_first_chunk is None:
+                                        resp_first_chunk = data_content[:200]
+                                    resp_last_chunk = data_content[:200]
+                                    resp_chunk_count += 1
                                     yield event
                                 if data_content == "[DONE]":
                                     break
                             else:
+                                # Debug: 追踪响应内容
+                                if resp_first_chunk is None:
+                                    resp_first_chunk = data_content[:200]
+                                resp_last_chunk = data_content[:200]
+                                resp_chunk_count += 1
                                 # 直接 yield 原始数据
                                 if data_content == "[DONE]":
                                     break
@@ -1616,7 +1631,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                     success=True, route_rule=f"workflow.{step_name}",
                 )
             logger.debug(f"[{request_id}] ← [{prov_name}] stream completed, step={step_name}")
-            logger.debug(f"[FallbackRouter] [RESULT] [REPONSE] [{prov_name}] step={step_name}, status=200 OK, input_tokens={input_tokens}, output_tokens={output_tokens}")
+            logger.debug(f"[FallbackRouter] [RESULT] [REPONSE] [{prov_name}] step={step_name}, status=200 OK, chunks={resp_chunk_count}, first={resp_first_chunk or 'none'}, last={resp_last_chunk or 'none'}, input_tokens={input_tokens}, output_tokens={output_tokens}")
 
         except HTTPStatusError as e:
             # 记录详细的错误响应信息
