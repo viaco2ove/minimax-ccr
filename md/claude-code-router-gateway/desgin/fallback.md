@@ -45,7 +45,17 @@ etc...
 - 业务如果大于providers 的 max_context : 输出
   - [FallbackRouter] [CHECK_RESULT] [NEET_NEXT] true [WHY]  exceed max message tokens
   - 如果是最后一个route，则返回错误信息：
-  - API Error: Request rejected (429) · {"detail":{"error":{"type":"rate_limit_exceeded","message":"Client error '429 Too Many Requests' for url
+  -API Error: Request rejected (400) ·
+```
+{
+  "detail": {
+    "error": {
+      "type": "invalid_request_error",
+      "message": "invalid params, context window exceeds limit"
+    }
+  }
+}
+```
 [200_null.md](../../error/200_null.md)
 
 
