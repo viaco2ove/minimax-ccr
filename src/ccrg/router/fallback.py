@@ -19,6 +19,46 @@ from .req_cli_pre import clean_request
 logger = logging.getLogger("ccrg")
 
 
+def _estimate_tokens(text: str) -> int:
+    """估算文本的 token 数量（简单按字符/4估算）"""
+    return len(text) // 4
+
+
+def _calc_msgs_tokens(msgs: list) -> int:
+    """计算 messages 的总 token 估算值"""
+    total = 0
+    for msg in msgs:
+        content = msg.get("content", [])
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    if block.get("type") == "text":
+                        text = block.get("text", "") or ""
+                        total += _estimate_tokens(str(text))
+                    elif block.get("type") == "image":
+                        # 图片按固定 token 估算
+                        total += 1000
+        elif isinstance(content, str):
+            total += _estimate_tokens(content)
+    return total
+
+
+def _get_provider_max_context(route: str) -> int | None:
+    """从 route 字符串解析 provider 名称，返回其 max_context 配置"""
+    # route 格式: "provider:model"
+    if ":" in route:
+        prov_name = route.split(":")[0]
+        # 从 main.py 导入 _config
+        from .. import main as main_module
+        cfg = getattr(main_module, '_config', None)
+        if cfg and cfg.providers:
+            prov_config = cfg.providers.get(prov_name)
+            if prov_config:
+                caps = getattr(prov_config, 'capabilities', {})
+                return caps.get("max_context")
+    return None
+
+
 class FallbackRouter:
     """按顺序尝试 route_list 中的 provider，成功则停止，失败则继续下一个"""
 
@@ -58,6 +98,21 @@ class FallbackRouter:
 
             # Debug: 标记即将发送 curl 请求（实际请求体在 call_provider_streaming 中打印）
             logger.debug(f"[FallbackRouter] [REQ] [CURL] route={route}, step={self.step_name}")
+
+            # Debug: 计算 msgs_tokens 并检查是否超过 provider 的 max_context
+            msgs_tokens = _calc_msgs_tokens(msgs)
+            max_context = _get_provider_max_context(route)
+            logger.debug(f"[FallbackRouter] [msgs_tokens] {msgs_tokens}, max_context={max_context}")
+
+            # 如果超过 max_context，跳过该 provider
+            if max_context and msgs_tokens > max_context:
+                logger.debug(f"[FallbackRouter] [CHECK_RESULT] [NEET_NEXT] true [WHY] exceed max message tokens: {msgs_tokens} > {max_context}")
+                # 如果是最后一个 provider，返回错误
+                if i == len(self.route_list) - 1:
+                    logger.error(f"[FallbackRouter] All providers exceed max context ({msgs_tokens} tokens), last provider {route} skipped")
+                    raise RuntimeError(f"All providers exceed max context ({msgs_tokens} tokens)")
+                logger.warning(f"[{self.request_id}] {route} exceeds max context ({msgs_tokens} > {max_context}), trying next...")
+                continue
 
             # Debug: 记录清理空字符前的 messages 预览
             if logger.isEnabledFor(logging.DEBUG):
