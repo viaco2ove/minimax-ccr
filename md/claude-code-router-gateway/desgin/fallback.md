@@ -41,7 +41,16 @@ etc...
 [FallbackRouter] [ReqCleanEmpty] 清理空字符 {"type": "text", "text": ""}...
 [ReqCleanEmpty.md](ReqCleanEmpty.md)
 
+[FallbackRouter] [msgs_tokens] {msgs_tokens_count}
+- 业务如果大于providers 的 max_context : 输出
+  - [FallbackRouter] [CHECK_RESULT] [NEET_NEXT] true [WHY]  exceed max message tokens
+  - 如果是最后一个route，则返回错误信息：
+  - API Error: Request rejected (429) · {"detail":{"error":{"type":"rate_limit_exceeded","message":"Client error '429 Too Many Requests' for url
+[200_null.md](../../error/200_null.md)
+
+
 [FallbackRouter] [REQ] [CURL] curl 请求体
+debug 时 请求体输出到logs/req/ 目录
 
 route.req(....)
 
