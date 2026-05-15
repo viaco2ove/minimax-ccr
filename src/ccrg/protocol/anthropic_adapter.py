@@ -156,7 +156,7 @@ class AnthropicAdapter(ProtocolAdapter):
 
 
 def _strip_system_reminders(obj: Any) -> Any:
-    """递归移除 system-reminder 块"""
+    """递归移除 system-reminder 块，并清理空内容"""
     if isinstance(obj, dict):
         result = {}
         for k, v in obj.items():
@@ -166,7 +166,17 @@ def _strip_system_reminders(obj: Any) -> Any:
                 result[k] = _strip_system_reminders(v)
         return result
     elif isinstance(obj, list):
-        return [_strip_system_reminders(item) for item in obj]
+        # 过滤空内容块
+        filtered = []
+        for item in obj:
+            stripped = _strip_system_reminders(item)
+            # 跳过空 text block
+            if isinstance(stripped, dict) and stripped.get("type") == "text":
+                text = stripped.get("text", "")
+                if not text or not text.strip():
+                    continue
+            filtered.append(stripped)
+        return filtered
     elif isinstance(obj, str):
         # 移除 <system-reminder>...</system-reminder> 块
         return re.sub(r'<system-reminder>.*?</system-reminder>', '', obj, flags=re.DOTALL).strip()

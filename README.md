@@ -9,10 +9,11 @@
 2.分流token 不同的模型做不同的事情
 
 ### 伪工作流
+CCRG 不用当「大脑」，只当「指挥 + 分流管道」
 扁平化命中机制。内部不做流程，而是摊开分流。
 去命中providers，但是claude code cli 能流式响应的效果。
 ### 尽量让每个 provider 都能流式响应。
-claude code cli 一次请求，CCRG 也只发出一个请求
+claude code cli 一次请求，CCRG 也只发出一个请求（除了fallback 和失败重试的的等兜底）
 
 ## 起因：rr
 minimax 2.7 太笨了，但是便宜
