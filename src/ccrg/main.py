@@ -21,6 +21,7 @@ from .classifier.tool_type import ToolTypeClassifier
 from .classifier.keyword import KeywordClassifier
 from .provider.registry import ProviderRegistry
 from .router import RoutingEngine
+from .router.fallback import FallbackRouter
 from .types import GatewayConfig, ProviderConfig, RequestTags
 from .usage_stats import get_usage_stats
 
@@ -1537,6 +1538,23 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 await asyncio.sleep(sleep_time)
             _provider_last_request_time[prov_name] = time.time()
 
+        # Debug: 打印完整的 curl 命令（每次请求都打印，不只是 400 时）
+        if logger.isEnabledFor(logging.DEBUG):
+            masked_headers = dict(prov_headers)
+            if "Authorization" in masked_headers:
+                masked_headers["Authorization"] = "Bearer ***"
+            body_preview = json.dumps(req_for_provider, ensure_ascii=False)
+            if len(body_preview) > 2000:
+                body_preview = body_preview[:2000] + "...(truncated)"
+            curl_cmd = (
+                f"curl -X POST '{prov_target_url}' \\\n"
+                f"  -H 'Content-Type: application/json' \\\n"
+                f"  -H 'Authorization: Bearer ***' \\\n"
+                f"  -H 'anthropic-version: 2023-06-01' \\\n"
+                f"  -d '{body_preview}'"
+            )
+            logger.debug(f"[FallbackRouter] [REQ] [CURL] [{prov_name}]:\n{curl_cmd}")
+
         try:
             async with httpx.AsyncClient(timeout=prov_timeout) as client:
                 async with client.stream("POST", prov_target_url, json=req_for_provider, headers=prov_headers) as response:
@@ -1598,6 +1616,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                     success=True, route_rule=f"workflow.{step_name}",
                 )
             logger.debug(f"[{request_id}] ← [{prov_name}] stream completed, step={step_name}")
+            logger.debug(f"[FallbackRouter] [RESULT] [REPONSE] [{prov_name}] step={step_name}, status=200 OK, input_tokens={input_tokens}, output_tokens={output_tokens}")
 
         except HTTPStatusError as e:
             # 记录详细的错误响应信息
@@ -1709,6 +1728,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
             # 429 Too Many Requests → 抛异常让调用方 fallback 到其他 provider
             if e.response.status_code == 429:
                 logger.warning(f"[{request_id}] Workflow {step_name} hit rate limit (429) from {prov_name}")
+                logger.debug(f"[FallbackRouter] [RESULT] [REPONSE] [{prov_name}] status=429")
                 if _usage_stats:
                     _usage_stats.record(
                         provider=prov_name, model=model,
@@ -1720,6 +1740,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
 
             # 其他 HTTP 错误 → 也抛异常让调用方 fallback
             logger.warning(f"[{request_id}] {prov_name} streaming returned {e.response.status_code}: {error_text[:200]}")
+            logger.debug(f"[FallbackRouter] [RESULT] [REPONSE] [{prov_name}] status={e.response.status_code}, error={error_text[:200] if error_text else str(e)}")
             if _usage_stats:
                 _usage_stats.record(
                     provider=prov_name, model=model,
@@ -1798,32 +1819,35 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
             route_list, step_name = _get_stage_routes("execute_solve", body)
 
         # 4. 流式调用 provider（带 fallback）
-        success = False
+        router = FallbackRouter(route_list, request_id, step_name)
+        router.log_route_hit("RouteList", str(route_list))
+
+        all_failed = True  # unused but kept for compatibility
         last_error = None
         last_error_type = "provider_error"
-        for try_route in route_list:
+
+        async def wrapped_call(route: str, msgs: list, step_name: str):
+            nonlocal last_error, last_error_type
             try:
-                logger.info(f"[{request_id}] Trying {try_route} for {step_name}")
-                async for chunk in call_provider_streaming(try_route, msgs, step_name):
+                async for chunk in call_provider_streaming(route, msgs, step_name):
                     yield chunk
-                    success = True  # 至少成功 yield 了一个 chunk
-                # async for 正常结束（无异常）→ provider 成功，不再尝试下一个
-                if success:
-                    logger.info(f"[{request_id}] {step_name} succeeded with {try_route}")
-                    return  # 直接返回，不继续尝试其他 provider
             except Exception as e:
                 last_error = e
-                # 检测是否是 rate limit 错误
                 if "429" in str(e) or "rate limit" in str(e).lower():
                     last_error_type = "rate_limit_exceeded"
                 elif "context length" in str(e).lower():
                     last_error_type = "context_length_exceeded"
-                logger.warning(f"[{request_id}] {try_route} failed for {step_name}: {e}, trying next...")
-                success = False
-                continue
+                raise
 
-        if not success:
-            error_msg = str(last_error) if last_error else f"All {len(route_list)} providers failed for {step_name}"
+        try:
+            async for chunk in router.call_provider_streaming(wrapped_call, msgs):
+                all_failed = False
+                yield chunk
+            # 正常返回，不走下面的 error 处理
+            return
+
+        except Exception:
+            error_msg = str(last_error) if last_error else f"All {len(route_list)} providers failed"
             logger.error(f"[{request_id}] {error_msg}")
             yield _make_streaming_error_sse({"error": {"type": last_error_type, "message": error_msg}})
 
