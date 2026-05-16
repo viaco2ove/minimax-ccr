@@ -16,6 +16,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from .config import load_config
 from .protocol import AnthropicAdapter, OpenAIAdapter, MiniMaxAdapter, ProtocolAdapter
+from .translator.openai_translator import AnthropicToOpenAISSEConverter
 from .classifier.scenario import ScenarioClassifier
 from .classifier.tool_type import ToolTypeClassifier
 from .classifier.keyword import KeywordClassifier
@@ -259,6 +260,76 @@ def init_app(config_path: str | None = None) -> FastAPI:
     @app.post("/v1/messages")
     async def handle_messages(request: Request):
         return await _handle_request(request)
+
+    @app.post("/v1/chat/completions")
+    async def handle_chat_completions(request: Request):
+        """OpenAI Chat Completions 格式端点 - 转换为 Anthropic 格式后处理"""
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"type": "invalid_request", "message": "Invalid JSON"}}
+            )
+
+        # 将 OpenAI 格式转换为 Anthropic 格式
+        transformed_body = _convert_openai_to_anthropic(body)
+
+        # 创建新请求，替换 body
+        class FakeRequest:
+            def __init__(self, json_body):
+                self._json = json_body
+            async def json(self):
+                return self._json
+
+        fake_request = FakeRequest(transformed_body)
+        resp = await _handle_request(fake_request)
+
+        from fastapi.responses import StreamingResponse
+
+        if transformed_body.get("stream") and isinstance(resp, StreamingResponse):
+            # stream=true: 转换为 OpenAI SSE 格式
+            return _convert_streaming_response_to_openai(resp, transformed_body.get("model", ""))
+        elif not transformed_body.get("stream") and isinstance(resp, StreamingResponse):
+            # stream=false: 但上游返回了流式响应，需要收集后转为 JSON
+            return await _convert_streaming_to_json(resp, transformed_body.get("model", ""))
+
+        return resp
+
+    @app.post("/chat/completions")
+    async def handle_chat_completions_no_v1(request: Request):
+        """OpenAI Chat Completions 格式端点（无 /v1 前缀）- 转换为 Anthropic 格式后处理"""
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"type": "invalid_request", "message": "Invalid JSON"}}
+            )
+
+        # 将 OpenAI 格式转换为 Anthropic 格式
+        transformed_body = _convert_openai_to_anthropic(body)
+
+        # 创建新请求，替换 body
+        class FakeRequest:
+            def __init__(self, json_body):
+                self._json = json_body
+            async def json(self):
+                return self._json
+
+        fake_request = FakeRequest(transformed_body)
+        resp = await _handle_request(fake_request)
+
+        from fastapi.responses import StreamingResponse
+
+        if transformed_body.get("stream") and isinstance(resp, StreamingResponse):
+            # stream=true: 转换为 OpenAI SSE 格式
+            return _convert_streaming_response_to_openai(resp, transformed_body.get("model", ""))
+        elif not transformed_body.get("stream") and isinstance(resp, StreamingResponse):
+            # stream=false: 但上游返回了流式响应，需要收集后转为 JSON
+            return await _convert_streaming_to_json(resp, transformed_body.get("model", ""))
+
+        return resp
 
     @app.get("/health")
     async def health():
@@ -1493,7 +1564,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
         req_body = dict(req_body)
         req_body["messages"] = messages
         req_body["model"] = model
-        req_body["stream"] = True
+        req_body["stream"] = is_streaming
 
         req_for_provider = prov_adapter.transform_request(req_body, _provider_config_to_dict(prov_config))
         req_for_provider["model"] = model
@@ -1867,6 +1938,220 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
             yield _make_streaming_error_sse({"error": {"type": last_error_type, "message": error_msg}})
 
     return StreamingResponse(workflow_stream_generator(), media_type="text/event-stream")
+
+
+def _convert_openai_to_anthropic(body: dict) -> dict:
+    """将 OpenAI Chat Completions 格式转换为 Anthropic Messages 格式"""
+    result = {
+        "model": body.get("model", "MiniMax-M2.7"),
+        "stream": body.get("stream", False),
+    }
+
+    # 处理 messages
+    messages = body.get("messages", [])
+    anthropic_messages = []
+    system_prompt = None
+
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+
+        # 提取 system prompt
+        if role == "system":
+            system_prompt = content if isinstance(content, str) else None
+            continue
+
+        # 转换 content
+        if isinstance(content, list):
+            # OpenAI 的 multi-modal content 转为 Anthropic 格式
+            anthropic_content = []
+            for item in content:
+                if isinstance(item, dict):
+                    if item.get("type") == "text":
+                        anthropic_content.append({"type": "text", "text": item.get("text", "")})
+                    elif item.get("type") == "image_url":
+                        # 提取 URL 或 base64
+                        img_data = item.get("image_url", {})
+                        url = img_data.get("url", "") if isinstance(img_data, dict) else ""
+                        if url.startswith("data:"):
+                            # data:image/png;base64,xxxxx
+                            media_type = url.split(";")[0].replace("data:", "") if url else "image/jpeg"
+                            b64 = url.split(",", 1)[1] if "," in url else ""
+                            anthropic_content.append({"type": "image", "source": {"type": "base64", "data": b64, "media_type": media_type}})
+                        else:
+                            anthropic_content.append({"type": "image", "source": {"type": "base64", "data": "", "media_type": "image/jpeg"}})
+                # 非 dict 类型忽略
+            anthropic_messages.append({"role": role, "content": anthropic_content or [{"type": "text", "text": ""}]})
+        elif isinstance(content, str):
+            anthropic_messages.append({"role": role, "content": [{"type": "text", "text": content}]})
+        else:
+            anthropic_messages.append({"role": role, "content": [{"type": "text", "text": str(content or "")}]})
+
+        # 处理 tool_calls：追加到当前 assistant 消息的 content 中
+        tool_calls = msg.get("tool_calls", [])
+        if tool_calls and role == "assistant":
+            for tc in tool_calls:
+                func = tc.get("function", {})
+                try:
+                    args = func.get("arguments", "{}")
+                    if isinstance(args, str):
+                        args = json.loads(args)
+                except (json.JSONDecodeError, TypeError):
+                    args = {}
+                anthropic_messages[-1]["content"].append({
+                    "type": "tool_use",
+                    "id": tc.get("id", f"toolu_{uuid.uuid4().hex[:8]}"),
+                    "name": func.get("name", "unknown"),
+                    "input": args
+                })
+
+        # 处理 tool 角色（转为 user 消息 + tool_result）
+        if role == "tool":
+            tool_use_id = msg.get("tool_call_id", "unknown")
+            tool_content = content or ""
+            if isinstance(tool_content, list):
+                tool_content = " ".join(
+                    item.get("text", "") if isinstance(item, dict) else str(item)
+                    for item in tool_content
+                )
+            tool_msg = {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": str(tool_content)
+                }]
+            }
+            anthropic_messages.append(tool_msg)
+
+    result["messages"] = anthropic_messages
+
+    # 设置 system prompt
+    if system_prompt:
+        result["system"] = system_prompt
+
+    # 处理其他参数
+    if "max_tokens" in body:
+        result["max_tokens"] = body["max_tokens"]
+
+    if "thinking" in body:
+        result["thinking"] = body["thinking"]
+
+    if "tools" in body:
+        # 转换 OpenAI tools 格式为 Anthropic tools 格式
+        anthropic_tools = []
+        for tool in body["tools"]:
+            if isinstance(tool, dict) and tool.get("type") == "function":
+                func = tool.get("function", {})
+                anthropic_tools.append({
+                    "name": func.get("name", ""),
+                    "description": func.get("description", ""),
+                    "input_schema": func.get("parameters", {"type": "object", "properties": {}})
+                })
+            elif isinstance(tool, dict):
+                anthropic_tools.append(tool)
+        result["tools"] = anthropic_tools
+
+    if "tool_choice" in body:
+        tc = body["tool_choice"]
+        if isinstance(tc, str):
+            result["tool_choice"] = {"type": "auto"}
+        elif isinstance(tc, dict) and tc.get("type") == "function":
+            result["tool_choice"] = {"type": "tool", "name": tc.get("name", "")}
+        else:
+            result["tool_choice"] = tc
+
+    return result
+
+
+def _convert_streaming_response_to_openai(response, model: str = ""):
+    """将 Anthropic SSE 流式响应转换为 OpenAI Chat Completions SSE 格式"""
+    from starlette.responses import StreamingResponse as StarletteStreamingResponse
+
+    async def convert_stream():
+        converter = AnthropicToOpenAISSEConverter(model)
+
+        try:
+            async for chunk in response.body_iterator:
+                # 将 Anthropic SSE chunk 转换为 OpenAI SSE chunk
+                events = converter.convert_chunk(chunk)
+                for event in events:
+                    yield event
+
+            # 发送 [DONE]
+            yield b"data: [DONE]\n\n"
+        except Exception as e:
+            logger.error(f"Stream conversion error: {e}")
+            # 发送错误
+            error_chunk = {
+                "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [{"index": 0, "delta": {"content": f"Error: {str(e)}"}, "finish_reason": "stop"}]
+            }
+            yield f"data: {json.dumps(error_chunk)}\n\n".encode("utf-8")
+            yield b"data: [DONE]\n\n"
+
+    return StarletteStreamingResponse(
+        convert_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache"}
+    )
+
+
+async def _convert_streaming_to_json(response, model: str = "") -> JSONResponse:
+    """将流式 SSE 响应收集后转换为非流式 JSON 响应"""
+    chunks = []
+    async for chunk in response.body_iterator:
+        chunks.append(chunk)
+
+    converter = AnthropicToOpenAISSEConverter(model)
+    for chunk in chunks:
+        converter.convert_chunk(chunk)
+
+    usage = converter.get_usage()
+    stop_reason = converter.stop_reason or "stop"
+    finish_map = {"end_turn": "stop", "tool_use": "tool_calls", "max_tokens": "length"}
+    finish = finish_map.get(stop_reason, "stop")
+
+    full_text = converter.get_full_text()
+    tool_calls = converter.get_tool_calls()
+
+    # 构建完整的 OpenAI JSON 响应
+    message = {"role": "assistant", "content": full_text or None}
+
+    if tool_calls:
+        message["tool_calls"] = [
+            {
+                "id": tc["id"],
+                "type": "function",
+                "function": {
+                    "name": tc["name"],
+                    "arguments": tc["arguments"]
+                }
+            }
+            for tc in tool_calls
+        ]
+
+    resp_data = {
+        "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "message": message,
+            "finish_reason": finish
+        }],
+        "usage": {
+            "prompt_tokens": usage.get("input_tokens", 0),
+            "completion_tokens": usage.get("output_tokens", 0),
+            "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
+        }
+    }
+
+    return JSONResponse(content=resp_data)
 
 
 def run(host: str | None = None, port: int | None = None, config_path: str | None = None):
