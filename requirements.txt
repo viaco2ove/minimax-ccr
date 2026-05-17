@@ -3,4 +3,4 @@
 python-dotenv
 fastapi>=0.100.0
 httpx>=0.24.0
-uvicorn>=0.20.0
+uvicorn>=26.1.1

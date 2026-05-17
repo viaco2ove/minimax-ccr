@@ -10,7 +10,7 @@ from threading import Lock
 
 from .types import GatewayConfig
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("ccrg")
 
 
 class UsageStats:

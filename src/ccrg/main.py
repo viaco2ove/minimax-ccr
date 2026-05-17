@@ -256,6 +256,10 @@ def init_app(config_path: str | None = None) -> FastAPI:
         for h in _root.handlers:
             h.setLevel(log_level)
 
+    # 确保 translator 子模块的 logger 也能输出 DEBUG
+    _translator_logger = logging.getLogger("ccrg.translator")
+    _translator_logger.setLevel(log_level)
+
     app = FastAPI(title="Claude Code Router Gateway")
 
     @app.post("/v1/messages")
@@ -279,6 +283,8 @@ def init_app(config_path: str | None = None) -> FastAPI:
         transformed_body = _convert_openai_to_anthropic(body)
         logger.debug(f"[TRANSLATOR_OPENAI] TRANSFORMED: {json.dumps(transformed_body, ensure_ascii=False)[:500]}")
 
+        logger.debug(f"[TRANSLATOR_OPENAI] stream=false, forcing stream=True for chunk collection")
+
         if transformed_body.get("stream"):
             # stream=true: 实时 yield SSE chunks
             return StreamingResponse(
@@ -287,35 +293,13 @@ def init_app(config_path: str | None = None) -> FastAPI:
                 headers={"Cache-Control": "no-cache"}
             )
         else:
-            # stream=false: 等待流结束，收集所有 chunks
+            # stream=false: 强制 stream=True 以收集 chunks，再转换为 JSON
+            transformed_body = dict(transformed_body)
+            transformed_body["stream"] = True
             chunks, model = await collect_request(_handle_request, transformed_body)
             resp_data = convert_chunks_to_json(chunks, model)
-            return JSONResponse(content=resp_data)
+            logger.debug(f"[TRANSLATOR_OPENAI] resp_data:{resp_data}")
 
-    @app.post("/chat/completions")
-    async def handle_chat_completions_no_v1(request: Request):
-        """OpenAI Chat Completions 格式端点（无 /v1 前缀）"""
-        try:
-            body = await request.json()
-        except Exception:
-            return JSONResponse(
-                status_code=400,
-                content={"error": {"type": "invalid_request", "message": "Invalid JSON"}}
-            )
-
-        logger.debug(f"[TRANSLATOR /chat] INPUT: {json.dumps(body, ensure_ascii=False)[:500]}")
-        transformed_body = _convert_openai_to_anthropic(body)
-        logger.debug(f"[TRANSLATOR /chat] TRANSFORMED: {json.dumps(transformed_body, ensure_ascii=False)[:500]}")
-
-        if transformed_body.get("stream"):
-            return StreamingResponse(
-                _stream_wrapper(_handle_request, transformed_body),
-                media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache"}
-            )
-        else:
-            chunks, model = await collect_request(_handle_request, transformed_body)
-            resp_data = convert_chunks_to_json(chunks, model)
             return JSONResponse(content=resp_data)
 
     @app.get("/health")
@@ -2052,8 +2036,8 @@ def _convert_openai_to_anthropic(body: dict) -> dict:
 
 
 def run(host: str | None = None, port: int | None = None, config_path: str | None = None):
-    """启动 Gateway"""
     import uvicorn
+    import asyncio
 
     init_app(config_path)
 
@@ -2061,8 +2045,20 @@ def run(host: str | None = None, port: int | None = None, config_path: str | Non
     port = port or (_config.server.get("port", 3458) if _config else 3458)
 
     logger.info(f"Starting CCRG on {host}:{port}")
-    uvicorn.run(app, host=host, port=port, log_level="info", timeout_graceful_shutdown=5)
 
+    # ✅✅✅ 调试绝杀：强制关闭 loop_factory ✅✅✅
+    config = uvicorn.Config(
+        app,
+        host=host,
+        port=port,
+        log_level="info",
+        timeout_graceful_shutdown=5
+    )
+    # 强制删掉冲突参数，让 PyCharm 调试无法报错
+    config.loop_factory = None
+
+    server = uvicorn.Server(config)
+    asyncio.run(server.serve())
 
 if __name__ == "__main__":
     run()

@@ -1,7 +1,7 @@
 src/ccrg/translator/openai_translator.py 负责转换
 src/ccrg/translator/sse_client.py 负责获取转换中间结果
 
-openai_translator.py<->sse_client.py<->Claude Code Router Gateway (CCRG)
+main.py(/v1/chat/completions) <->openai_translator.py<->sse_client.py<->Claude Code Router Gateway (CCRG)
 
 ## openai_translator.py 只进行输入输出的处理
 ## sse_client.py 把输入传入Claude Code Router Gateway (CCRG)

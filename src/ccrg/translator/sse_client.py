@@ -13,7 +13,7 @@ from typing import AsyncGenerator
 
 from .openai_translator import AnthropicToOpenAISSEConverter
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("ccrg")
 
 
 class FakeRequest:
