@@ -123,6 +123,10 @@ cd currpath
 ## 日志标签
 [logtag.md](md/code/logtag.md)
 
+## 接入方案
+[claude_code_cli.md](md/claude-code-router-gateway/api/claude_code_cli.md)
+[workbuddy.md](md/claude-code-router-gateway/api/workbuddy.md)
+
 ## License
 
 MIT
