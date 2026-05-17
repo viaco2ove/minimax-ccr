@@ -8,7 +8,7 @@ from typing import AsyncGenerator, Optional
 
 from starlette.responses import StreamingResponse as StarletteStreamingResponse
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("ccrg")
 
 
 async def _stream_wrapper(ccrg_handler, transformed_body) -> AsyncGenerator[bytes, None]:
@@ -45,6 +45,7 @@ def convert_chunks_to_json(chunks: list, model: str) -> dict:
 
     converter = AnthropicToOpenAISSEConverter(model)
     for chunk in chunks:
+        logger.debug(f"[TRANSLATOR_OPENAI]  convert_chunks_to_json original:{chunk}")
         converter.convert_chunk(chunk)
 
     usage = converter.get_usage()
@@ -207,10 +208,20 @@ class AnthropicToOpenAISSEConverter:
         self._tool_calls: list = []
 
     def convert_chunk(self, raw_chunk: bytes) -> list:
-        line = raw_chunk.decode("utf-8", errors="replace").strip()
+        text = raw_chunk.decode("utf-8", errors="replace")
+        lines = text.split("\n")
+        all_events = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            events = self._process_line(line)
+            all_events.extend(events)
+        return all_events
+
+    def _process_line(self, line: str) -> list:
+        """处理一行内容"""
         logger.debug(f"[OpenaiTranslator] [RawChunk] [Line]: {line}")
-        if not line:
-            return []
         if line.startswith("event: "):
             self._pending_event_type = line[7:].strip()
             logger.debug(f"[CONVERTER] event: {self._pending_event_type}")
