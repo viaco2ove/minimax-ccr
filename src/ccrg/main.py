@@ -16,7 +16,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from .config import load_config
 from .protocol import AnthropicAdapter, OpenAIAdapter, MiniMaxAdapter, ProtocolAdapter
-from .translator.openai_translator import AnthropicToOpenAISSEConverter
+from .translator.openai_translator import AnthropicToOpenAISSEConverter, convert_streaming_to_openai, collect_and_convert_to_json
 from .classifier.scenario import ScenarioClassifier
 from .classifier.tool_type import ToolTypeClassifier
 from .classifier.keyword import KeywordClassifier
@@ -265,6 +265,7 @@ def init_app(config_path: str | None = None) -> FastAPI:
     async def handle_chat_completions(request: Request):
         """OpenAI Chat Completions 格式端点 - 转换为 Anthropic 格式后处理"""
         try:
+            logger.debug(f"[TRANSLATOR_OPENAI] [REQ]: /v1/chat/completions")
             body = await request.json()
         except Exception:
             return JSONResponse(
@@ -272,8 +273,11 @@ def init_app(config_path: str | None = None) -> FastAPI:
                 content={"error": {"type": "invalid_request", "message": "Invalid JSON"}}
             )
 
+        logger.debug(f"[OPENAI INPUT] Original request: {json.dumps(body, ensure_ascii=False)[:2000]}")
+
         # 将 OpenAI 格式转换为 Anthropic 格式
         transformed_body = _convert_openai_to_anthropic(body)
+        logger.debug(f"[OPENAI TRANSFORMED] Transformed body: {json.dumps(transformed_body, ensure_ascii=False)[:2000]}")
 
         # 创建新请求，替换 body
         class FakeRequest:
@@ -285,21 +289,69 @@ def init_app(config_path: str | None = None) -> FastAPI:
         fake_request = FakeRequest(transformed_body)
         resp = await _handle_request(fake_request)
 
+        logger.debug(f"[OPENAI RESP] resp type={type(resp).__name__}, is_streaming={transformed_body.get('stream')}")
+
         from fastapi.responses import StreamingResponse
 
         if transformed_body.get("stream") and isinstance(resp, StreamingResponse):
             # stream=true: 转换为 OpenAI SSE 格式
-            return _convert_streaming_response_to_openai(resp, transformed_body.get("model", ""))
+            return convert_streaming_to_openai(resp, transformed_body.get("model", ""))
         elif not transformed_body.get("stream") and isinstance(resp, StreamingResponse):
-            # stream=false: 但上游返回了流式响应，需要收集后转为 JSON
-            return await _convert_streaming_to_json(resp, transformed_body.get("model", ""))
+            # stream=false: 等待流完全结束，收集所有 chunks 后转为 JSON
+            chunks = []
+            async for chunk in resp.body_iterator:
+                chunks.append(chunk)
+                logger.debug(f"[OPENAI COLLECT] chunk: {len(chunk)} bytes, data: {chunk.decode('utf-8', errors='replace').strip()[:200]}")
 
-        return resp
+            logger.debug(f"[OPENAI COLLECT] Total chunks: {len(chunks)}")
+
+            # 使用 converter 处理 chunks
+            converter = AnthropicToOpenAISSEConverter(transformed_body.get("model", ""))
+            for chunk in chunks:
+                converter.convert_chunk(chunk)
+
+            usage = converter.get_usage()
+            stop_reason = converter.stop_reason or "stop"
+            finish_map = {"end_turn": "stop", "tool_use": "tool_calls", "max_tokens": "length"}
+            finish = finish_map.get(stop_reason, "stop")
+            full_text = converter.get_full_text()
+            tool_calls = converter.get_tool_calls()
+
+            logger.debug(f"[OPENAI COLLECT] full_text len={len(full_text)}, tool_calls={tool_calls}, stop_reason={stop_reason}")
+
+            message = {"role": "assistant", "content": full_text or None}
+            if tool_calls:
+                message["tool_calls"] = [
+                    {"id": tc["id"], "type": "function", "function": {"name": tc["name"], "arguments": tc["arguments"]}}
+                    for tc in tool_calls
+                ]
+
+            resp_data = {
+                "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": transformed_body.get("model", ""),
+                "choices": [{"index": 0, "message": message, "finish_reason": finish}],
+                "usage": {
+                    "prompt_tokens": usage.get("input_tokens", 0),
+                    "completion_tokens": usage.get("output_tokens", 0),
+                    "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
+                }
+            }
+            logger.debug(f"[OPENAI COLLECT] resp_data: {resp_data}")
+            return JSONResponse(content=resp_data)
+        elif isinstance(resp, JSONResponse):
+            logger.debug(f"[OPENAI RESP] Returning JSONResponse directly")
+            return resp
+        else:
+            logger.warning(f"[OPENAI RESP] Unknown response type: {type(resp)}")
+            return resp
 
     @app.post("/chat/completions")
     async def handle_chat_completions_no_v1(request: Request):
         """OpenAI Chat Completions 格式端点（无 /v1 前缀）- 转换为 Anthropic 格式后处理"""
         try:
+            logger.debug(f"[TRANSLATOR_OPENAI] [REQ]: /chat/completions")
             body = await request.json()
         except Exception:
             return JSONResponse(
@@ -307,8 +359,11 @@ def init_app(config_path: str | None = None) -> FastAPI:
                 content={"error": {"type": "invalid_request", "message": "Invalid JSON"}}
             )
 
+        logger.debug(f"[OPENAI INPUT] Original request: {json.dumps(body, ensure_ascii=False)[:2000]}")
+
         # 将 OpenAI 格式转换为 Anthropic 格式
         transformed_body = _convert_openai_to_anthropic(body)
+        logger.debug(f"[OPENAI TRANSFORMED] Transformed body: {json.dumps(transformed_body, ensure_ascii=False)[:2000]}")
 
         # 创建新请求，替换 body
         class FakeRequest:
@@ -320,16 +375,15 @@ def init_app(config_path: str | None = None) -> FastAPI:
         fake_request = FakeRequest(transformed_body)
         resp = await _handle_request(fake_request)
 
+        logger.debug(f"[OPENAI RESP /chat] resp type={type(resp).__name__}, is_streaming={transformed_body.get('stream')}")
+
         from fastapi.responses import StreamingResponse
 
         if transformed_body.get("stream") and isinstance(resp, StreamingResponse):
-            # stream=true: 转换为 OpenAI SSE 格式
-            return _convert_streaming_response_to_openai(resp, transformed_body.get("model", ""))
+            return convert_streaming_to_openai(resp, transformed_body.get("model", ""))
         elif not transformed_body.get("stream") and isinstance(resp, StreamingResponse):
-            # stream=false: 但上游返回了流式响应，需要收集后转为 JSON
-            return await _convert_streaming_to_json(resp, transformed_body.get("model", ""))
-
-        return resp
+            result = await collect_and_convert_to_json(resp, transformed_body.get("model", ""))
+            return JSONResponse(content=result)
 
     @app.get("/health")
     async def health():
@@ -2062,96 +2116,6 @@ def _convert_openai_to_anthropic(body: dict) -> dict:
             result["tool_choice"] = tc
 
     return result
-
-
-def _convert_streaming_response_to_openai(response, model: str = ""):
-    """将 Anthropic SSE 流式响应转换为 OpenAI Chat Completions SSE 格式"""
-    from starlette.responses import StreamingResponse as StarletteStreamingResponse
-
-    async def convert_stream():
-        converter = AnthropicToOpenAISSEConverter(model)
-
-        try:
-            async for chunk in response.body_iterator:
-                # 将 Anthropic SSE chunk 转换为 OpenAI SSE chunk
-                events = converter.convert_chunk(chunk)
-                for event in events:
-                    yield event
-
-            # 发送 [DONE]
-            yield b"data: [DONE]\n\n"
-        except Exception as e:
-            logger.error(f"Stream conversion error: {e}")
-            # 发送错误
-            error_chunk = {
-                "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
-                "object": "chat.completion.chunk",
-                "created": int(time.time()),
-                "model": model,
-                "choices": [{"index": 0, "delta": {"content": f"Error: {str(e)}"}, "finish_reason": "stop"}]
-            }
-            yield f"data: {json.dumps(error_chunk)}\n\n".encode("utf-8")
-            yield b"data: [DONE]\n\n"
-
-    return StarletteStreamingResponse(
-        convert_stream(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache"}
-    )
-
-
-async def _convert_streaming_to_json(response, model: str = "") -> JSONResponse:
-    """将流式 SSE 响应收集后转换为非流式 JSON 响应"""
-    chunks = []
-    async for chunk in response.body_iterator:
-        chunks.append(chunk)
-
-    converter = AnthropicToOpenAISSEConverter(model)
-    for chunk in chunks:
-        converter.convert_chunk(chunk)
-
-    usage = converter.get_usage()
-    stop_reason = converter.stop_reason or "stop"
-    finish_map = {"end_turn": "stop", "tool_use": "tool_calls", "max_tokens": "length"}
-    finish = finish_map.get(stop_reason, "stop")
-
-    full_text = converter.get_full_text()
-    tool_calls = converter.get_tool_calls()
-
-    # 构建完整的 OpenAI JSON 响应
-    message = {"role": "assistant", "content": full_text or None}
-
-    if tool_calls:
-        message["tool_calls"] = [
-            {
-                "id": tc["id"],
-                "type": "function",
-                "function": {
-                    "name": tc["name"],
-                    "arguments": tc["arguments"]
-                }
-            }
-            for tc in tool_calls
-        ]
-
-    resp_data = {
-        "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
-        "object": "chat.completion",
-        "created": int(time.time()),
-        "model": model,
-        "choices": [{
-            "index": 0,
-            "message": message,
-            "finish_reason": finish
-        }],
-        "usage": {
-            "prompt_tokens": usage.get("input_tokens", 0),
-            "completion_tokens": usage.get("output_tokens", 0),
-            "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
-        }
-    }
-
-    return JSONResponse(content=resp_data)
 
 
 def run(host: str | None = None, port: int | None = None, config_path: str | None = None):
