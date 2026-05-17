@@ -16,7 +16,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from .config import load_config
 from .protocol import AnthropicAdapter, OpenAIAdapter, MiniMaxAdapter, ProtocolAdapter
-from .translator.openai_translator import AnthropicToOpenAISSEConverter, convert_streaming_to_openai
+from .translator.openai_translator import convert_chunks_to_json
+from .translator.sse_client import _stream_wrapper, collect_request
 from .classifier.scenario import ScenarioClassifier
 from .classifier.tool_type import ToolTypeClassifier
 from .classifier.keyword import KeywordClassifier
@@ -265,7 +266,6 @@ def init_app(config_path: str | None = None) -> FastAPI:
     async def handle_chat_completions(request: Request):
         """OpenAI Chat Completions 格式端点 - 转换为 Anthropic 格式后处理"""
         try:
-            logger.debug(f"[TRANSLATOR_OPENAI] [REQ]: /v1/chat/completions")
             body = await request.json()
         except Exception:
             return JSONResponse(
@@ -273,80 +273,50 @@ def init_app(config_path: str | None = None) -> FastAPI:
                 content={"error": {"type": "invalid_request", "message": "Invalid JSON"}}
             )
 
-        logger.debug(f"[TRANSLATOR_OPENAI][OPENAI INPUT] Original request: {json.dumps(body, ensure_ascii=False)[:2000]}")
+        logger.debug(f"[TRANSLATOR_OPENAI] INPUT: {json.dumps(body, ensure_ascii=False)[:500]}")
 
-        # 将 OpenAI 格式转换为 Anthropic 格式
+        # OpenAI 格式 -> Anthropic 格式
         transformed_body = _convert_openai_to_anthropic(body)
-        logger.debug(f"[TRANSLATOR_OPENAI][OPENAI TRANSFORMED] Transformed body: {json.dumps(transformed_body, ensure_ascii=False)[:2000]}")
+        logger.debug(f"[TRANSLATOR_OPENAI] TRANSFORMED: {json.dumps(transformed_body, ensure_ascii=False)[:500]}")
 
-        # 创建新请求，替换 body
-        class FakeRequest:
-            def __init__(self, json_body):
-                self._json = json_body
-            async def json(self):
-                return self._json
-
-        fake_request = FakeRequest(transformed_body)
-        resp = await _handle_request(fake_request)
-
-        logger.debug(f"[TRANSLATOR_OPENAI][OPENAI RESP] resp type={type(resp).__name__}, is_streaming={transformed_body.get('stream')}")
-
-        from fastapi.responses import StreamingResponse
-
-        logger.debug(f"[TRANSLATOR_OPENAI] [REQ]: stream:"+transformed_body.get("stream") )
-        if transformed_body.get("stream") and isinstance(resp, StreamingResponse):
-            # stream=true: 转换为 OpenAI SSE 格式
-            return convert_streaming_to_openai(resp, transformed_body.get("model", ""))
-        elif not transformed_body.get("stream") and isinstance(resp, StreamingResponse):
-            # stream=false: 等待流完全结束，收集所有 chunks 后转为 JSON
-            chunks = []
-            async for chunk in resp.body_iterator:
-                chunks.append(chunk)
-                logger.debug(f"[TRANSLATOR_OPENAI][OPENAI COLLECT] chunk: {len(chunk)} bytes, data: {chunk.decode('utf-8', errors='replace').strip()[:200]}")
-
-            logger.debug(f"[TRANSLATOR_OPENAI][OPENAI COLLECT] Total chunks: {len(chunks)}")
-
-            # 使用 converter 处理 chunks
-            converter = AnthropicToOpenAISSEConverter(transformed_body.get("model", ""))
-            for chunk in chunks:
-                converter.convert_chunk(chunk)
-
-            usage = converter.get_usage()
-            stop_reason = converter.stop_reason or "stop"
-            finish_map = {"end_turn": "stop", "tool_use": "tool_calls", "max_tokens": "length"}
-            finish = finish_map.get(stop_reason, "stop")
-            full_text = converter.get_full_text()
-            tool_calls = converter.get_tool_calls()
-
-            logger.debug(f"[TRANSLATOR_OPENAI][OPENAI COLLECT] full_text len={len(full_text)}, tool_calls={tool_calls}, stop_reason={stop_reason}")
-
-            message = {"role": "assistant", "content": full_text or None}
-            if tool_calls:
-                message["tool_calls"] = [
-                    {"id": tc["id"], "type": "function", "function": {"name": tc["name"], "arguments": tc["arguments"]}}
-                    for tc in tool_calls
-                ]
-
-            resp_data = {
-                "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
-                "object": "chat.completion",
-                "created": int(time.time()),
-                "model": transformed_body.get("model", ""),
-                "choices": [{"index": 0, "message": message, "finish_reason": finish}],
-                "usage": {
-                    "prompt_tokens": usage.get("input_tokens", 0),
-                    "completion_tokens": usage.get("output_tokens", 0),
-                    "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
-                }
-            }
-            logger.debug(f"[TRANSLATOR_OPENAI][OPENAI COLLECT] resp_data: {resp_data}")
-            return JSONResponse(content=resp_data)
-        elif isinstance(resp, JSONResponse):
-            logger.debug(f"[TRANSLATOR_OPENAI][OPENAI RESP] Returning JSONResponse directly")
-            return resp
+        if transformed_body.get("stream"):
+            # stream=true: 实时 yield SSE chunks
+            return StreamingResponse(
+                _stream_wrapper(_handle_request, transformed_body),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache"}
+            )
         else:
-            logger.warning(f"[OPENAI RESP] Unknown response type: {type(resp)}")
-            return resp
+            # stream=false: 等待流结束，收集所有 chunks
+            chunks, model = await collect_request(_handle_request, transformed_body)
+            resp_data = convert_chunks_to_json(chunks, model)
+            return JSONResponse(content=resp_data)
+
+    @app.post("/chat/completions")
+    async def handle_chat_completions_no_v1(request: Request):
+        """OpenAI Chat Completions 格式端点（无 /v1 前缀）"""
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"type": "invalid_request", "message": "Invalid JSON"}}
+            )
+
+        logger.debug(f"[TRANSLATOR /chat] INPUT: {json.dumps(body, ensure_ascii=False)[:500]}")
+        transformed_body = _convert_openai_to_anthropic(body)
+        logger.debug(f"[TRANSLATOR /chat] TRANSFORMED: {json.dumps(transformed_body, ensure_ascii=False)[:500]}")
+
+        if transformed_body.get("stream"):
+            return StreamingResponse(
+                _stream_wrapper(_handle_request, transformed_body),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache"}
+            )
+        else:
+            chunks, model = await collect_request(_handle_request, transformed_body)
+            resp_data = convert_chunks_to_json(chunks, model)
+            return JSONResponse(content=resp_data)
 
     @app.get("/health")
     async def health():

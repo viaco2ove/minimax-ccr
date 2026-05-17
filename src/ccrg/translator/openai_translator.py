@@ -11,6 +11,73 @@ from starlette.responses import StreamingResponse as StarletteStreamingResponse
 logger = logging.getLogger(__name__)
 
 
+async def _stream_wrapper(ccrg_handler, transformed_body) -> AsyncGenerator[bytes, None]:
+    """流式包装器：调用 CCRG handler，yield 每个 SSE chunk
+
+    用于 stream=true，实时返回每个 chunk
+    """
+    # 创建 FakeRequest
+    class FakeRequest:
+        def __init__(self, body):
+            self._json = body
+        async def json(self):
+            return self._json
+
+    fake_request = FakeRequest(transformed_body)
+    resp = await ccrg_handler(fake_request)
+
+    logger.debug(f"[STREAM_WRAPPER] CCRG returned: {type(resp).__name__}")
+
+    # 直接 yield body_iterator
+    converter = AnthropicToOpenAISSEConverter(transformed_body.get("model", ""))
+    async for raw_chunk in resp.body_iterator:
+        events = converter.convert_chunk(raw_chunk)
+        for event in events:
+            yield event
+
+
+def convert_chunks_to_json(chunks: list, model: str) -> dict:
+    """将收集的 chunks 列表转换为 OpenAI JSON 格式
+
+    用于 stream=false，等待流结束后一次性转换
+    """
+    logger.debug(f"[TO_JSON] Converting {len(chunks)} chunks to JSON")
+
+    converter = AnthropicToOpenAISSEConverter(model)
+    for chunk in chunks:
+        converter.convert_chunk(chunk)
+
+    usage = converter.get_usage()
+    stop_reason = converter.stop_reason or "stop"
+    finish_map = {"end_turn": "stop", "tool_use": "tool_calls", "max_tokens": "length"}
+    finish = finish_map.get(stop_reason, "stop")
+
+    full_text = converter.get_full_text()
+    tool_calls = converter.get_tool_calls()
+
+    message = {"role": "assistant", "content": full_text or None}
+    if tool_calls:
+        message["tool_calls"] = [
+            {"id": tc["id"], "type": "function", "function": {"name": tc["name"], "arguments": tc["arguments"]}}
+            for tc in tool_calls
+        ]
+
+    resp_data = {
+        "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{"index": 0, "message": message, "finish_reason": finish}],
+        "usage": {
+            "prompt_tokens": usage.get("input_tokens", 0),
+            "completion_tokens": usage.get("output_tokens", 0),
+            "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
+        }
+    }
+    logger.debug(f"[TO_JSON] Result: content_len={len(full_text)}, tool_calls={len(tool_calls)}")
+    return resp_data
+
+
 def convert_streaming_to_openai(response, model: str = ""):
     """将 Anthropic SSE 流式响应转换为 OpenAI Chat Completions SSE 格式
 
@@ -53,7 +120,7 @@ def convert_streaming_to_openai(response, model: str = ""):
     )
 
 
-async def collect_and_convert_to_json(response, model: str = "") -> dict:
+async def collect_streaming_to_json(response, model: str = "") -> dict:
     """收集流式响应的所有 chunks，然后转换为非流式 JSON
 
     Args:
