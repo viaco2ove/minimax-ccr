@@ -7,6 +7,7 @@ import logging
 from typing import AsyncGenerator, Optional
 
 from starlette.responses import StreamingResponse as StarletteStreamingResponse
+from ..log.log_controller import verbose_log
 
 logger = logging.getLogger("ccrg")
 
@@ -45,7 +46,7 @@ def convert_chunks_to_json(chunks: list, model: str) -> dict:
 
     converter = AnthropicToOpenAISSEConverter(model)
     for chunk in chunks:
-        logger.debug(f"[TRANSLATOR_OPENAI]  convert_chunks_to_json original:{chunk}")
+        verbose_log("TRANSLATOR_OPENAI", f"convert_chunks_to_json original:{chunk}", "TRANSLATOR_CONVERT_CHUNKS")
         converter.convert_chunk(chunk)
 
     usage = converter.get_usage()
@@ -221,17 +222,17 @@ class AnthropicToOpenAISSEConverter:
 
     def _process_line(self, line: str) -> list:
         """处理一行内容"""
-        logger.debug(f"[OpenaiTranslator] [RawChunk] [Line]: {line}")
+        verbose_log("OpenaiTranslator", f"[RawChunk] [Line]: {line}")
         if line.startswith("event: "):
             self._pending_event_type = line[7:].strip()
-            logger.debug(f"[CONVERTER] event: {self._pending_event_type}")
+            verbose_log("CONVERTER", f"event: {self._pending_event_type}")
             return []
         if not line.startswith("data: "):
-            logger.debug(f"[CONVERTER] non-data line: {line[:100]}")
+            verbose_log("CONVERTER", f"non-data line: {line[:100]}")
             return []
         data = line[6:]
         if data.strip() == "[DONE]":
-            logger.debug(f"[CONVERTER] received [DONE]")
+            verbose_log("CONVERTER", "received [DONE]")
             return self._handle_done()
         try:
             chunk = json.loads(data)
@@ -240,12 +241,12 @@ class AnthropicToOpenAISSEConverter:
             return []
         chunk_type = self._pending_event_type or chunk.get("type")
         self._pending_event_type = None
-        logger.debug(f"[CONVERTER] Processing chunk type={chunk_type}, data={json.dumps(chunk, ensure_ascii=False)[:300]}")
+        verbose_log("CONVERTER", f"Processing chunk type={chunk_type}, data={json.dumps(chunk, ensure_ascii=False)[:300]}")
         return self._process_chunk(chunk_type, chunk)
 
     def _process_chunk(self, chunk_type: str, chunk: dict) -> list:
         events = []
-        logger.debug(f"[CONVERTER] _process_chunk type={chunk_type}")
+        verbose_log("CONVERTER", f"_process_chunk type={chunk_type}")
         if chunk_type == "message_start":
             events.extend(self._handle_message_start(chunk))
         elif chunk_type == "content_block_start":
@@ -258,7 +259,7 @@ class AnthropicToOpenAISSEConverter:
             events.extend(self._handle_message_delta(chunk))
         else:
             logger.warning(f"[CONVERTER] Unknown chunk type: {chunk_type}")
-        logger.debug(f"[CONVERTER] Produced {len(events)} events")
+        verbose_log("CONVERTER", f"Produced {len(events)} events")
         return events
 
     def _handle_message_start(self, chunk: dict) -> list:
