@@ -54,7 +54,7 @@ def _get_provider_max_context(route: str) -> int | None:
         if cfg and cfg.providers:
             prov_config = cfg.providers.get(prov_name)
             if prov_config:
-                caps = getattr(prov_config, 'capabilities', {})
+                caps = prov_config.get('capabilities', {})
                 return caps.get("max_context")
     return None
 
