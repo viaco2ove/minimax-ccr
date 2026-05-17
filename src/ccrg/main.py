@@ -16,7 +16,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from .config import load_config
 from .protocol import AnthropicAdapter, OpenAIAdapter, MiniMaxAdapter, ProtocolAdapter
-from .translator.openai_translator import AnthropicToOpenAISSEConverter, convert_streaming_to_openai, collect_and_convert_to_json
+from .translator.openai_translator import AnthropicToOpenAISSEConverter, convert_streaming_to_openai
 from .classifier.scenario import ScenarioClassifier
 from .classifier.tool_type import ToolTypeClassifier
 from .classifier.keyword import KeywordClassifier
@@ -273,11 +273,11 @@ def init_app(config_path: str | None = None) -> FastAPI:
                 content={"error": {"type": "invalid_request", "message": "Invalid JSON"}}
             )
 
-        logger.debug(f"[OPENAI INPUT] Original request: {json.dumps(body, ensure_ascii=False)[:2000]}")
+        logger.debug(f"[TRANSLATOR_OPENAI][OPENAI INPUT] Original request: {json.dumps(body, ensure_ascii=False)[:2000]}")
 
         # 将 OpenAI 格式转换为 Anthropic 格式
         transformed_body = _convert_openai_to_anthropic(body)
-        logger.debug(f"[OPENAI TRANSFORMED] Transformed body: {json.dumps(transformed_body, ensure_ascii=False)[:2000]}")
+        logger.debug(f"[TRANSLATOR_OPENAI][OPENAI TRANSFORMED] Transformed body: {json.dumps(transformed_body, ensure_ascii=False)[:2000]}")
 
         # 创建新请求，替换 body
         class FakeRequest:
@@ -289,10 +289,11 @@ def init_app(config_path: str | None = None) -> FastAPI:
         fake_request = FakeRequest(transformed_body)
         resp = await _handle_request(fake_request)
 
-        logger.debug(f"[OPENAI RESP] resp type={type(resp).__name__}, is_streaming={transformed_body.get('stream')}")
+        logger.debug(f"[TRANSLATOR_OPENAI][OPENAI RESP] resp type={type(resp).__name__}, is_streaming={transformed_body.get('stream')}")
 
         from fastapi.responses import StreamingResponse
 
+        logger.debug(f"[TRANSLATOR_OPENAI] [REQ]: stream:"+transformed_body.get("stream") )
         if transformed_body.get("stream") and isinstance(resp, StreamingResponse):
             # stream=true: 转换为 OpenAI SSE 格式
             return convert_streaming_to_openai(resp, transformed_body.get("model", ""))
@@ -301,9 +302,9 @@ def init_app(config_path: str | None = None) -> FastAPI:
             chunks = []
             async for chunk in resp.body_iterator:
                 chunks.append(chunk)
-                logger.debug(f"[OPENAI COLLECT] chunk: {len(chunk)} bytes, data: {chunk.decode('utf-8', errors='replace').strip()[:200]}")
+                logger.debug(f"[TRANSLATOR_OPENAI][OPENAI COLLECT] chunk: {len(chunk)} bytes, data: {chunk.decode('utf-8', errors='replace').strip()[:200]}")
 
-            logger.debug(f"[OPENAI COLLECT] Total chunks: {len(chunks)}")
+            logger.debug(f"[TRANSLATOR_OPENAI][OPENAI COLLECT] Total chunks: {len(chunks)}")
 
             # 使用 converter 处理 chunks
             converter = AnthropicToOpenAISSEConverter(transformed_body.get("model", ""))
@@ -317,7 +318,7 @@ def init_app(config_path: str | None = None) -> FastAPI:
             full_text = converter.get_full_text()
             tool_calls = converter.get_tool_calls()
 
-            logger.debug(f"[OPENAI COLLECT] full_text len={len(full_text)}, tool_calls={tool_calls}, stop_reason={stop_reason}")
+            logger.debug(f"[TRANSLATOR_OPENAI][OPENAI COLLECT] full_text len={len(full_text)}, tool_calls={tool_calls}, stop_reason={stop_reason}")
 
             message = {"role": "assistant", "content": full_text or None}
             if tool_calls:
@@ -338,52 +339,14 @@ def init_app(config_path: str | None = None) -> FastAPI:
                     "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
                 }
             }
-            logger.debug(f"[OPENAI COLLECT] resp_data: {resp_data}")
+            logger.debug(f"[TRANSLATOR_OPENAI][OPENAI COLLECT] resp_data: {resp_data}")
             return JSONResponse(content=resp_data)
         elif isinstance(resp, JSONResponse):
-            logger.debug(f"[OPENAI RESP] Returning JSONResponse directly")
+            logger.debug(f"[TRANSLATOR_OPENAI][OPENAI RESP] Returning JSONResponse directly")
             return resp
         else:
             logger.warning(f"[OPENAI RESP] Unknown response type: {type(resp)}")
             return resp
-
-    @app.post("/chat/completions")
-    async def handle_chat_completions_no_v1(request: Request):
-        """OpenAI Chat Completions 格式端点（无 /v1 前缀）- 转换为 Anthropic 格式后处理"""
-        try:
-            logger.debug(f"[TRANSLATOR_OPENAI] [REQ]: /chat/completions")
-            body = await request.json()
-        except Exception:
-            return JSONResponse(
-                status_code=400,
-                content={"error": {"type": "invalid_request", "message": "Invalid JSON"}}
-            )
-
-        logger.debug(f"[OPENAI INPUT] Original request: {json.dumps(body, ensure_ascii=False)[:2000]}")
-
-        # 将 OpenAI 格式转换为 Anthropic 格式
-        transformed_body = _convert_openai_to_anthropic(body)
-        logger.debug(f"[OPENAI TRANSFORMED] Transformed body: {json.dumps(transformed_body, ensure_ascii=False)[:2000]}")
-
-        # 创建新请求，替换 body
-        class FakeRequest:
-            def __init__(self, json_body):
-                self._json = json_body
-            async def json(self):
-                return self._json
-
-        fake_request = FakeRequest(transformed_body)
-        resp = await _handle_request(fake_request)
-
-        logger.debug(f"[OPENAI RESP /chat] resp type={type(resp).__name__}, is_streaming={transformed_body.get('stream')}")
-
-        from fastapi.responses import StreamingResponse
-
-        if transformed_body.get("stream") and isinstance(resp, StreamingResponse):
-            return convert_streaming_to_openai(resp, transformed_body.get("model", ""))
-        elif not transformed_body.get("stream") and isinstance(resp, StreamingResponse):
-            result = await collect_and_convert_to_json(resp, transformed_body.get("model", ""))
-            return JSONResponse(content=result)
 
     @app.get("/health")
     async def health():
