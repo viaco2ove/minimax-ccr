@@ -1932,6 +1932,26 @@ def _convert_openai_to_anthropic(body: dict) -> dict:
             system_prompt = content if isinstance(content, str) else None
             continue
 
+        # 处理 tool 角色：转为 user 消息 + tool_result（跳过 normal append）
+        if role == "tool":
+            tool_use_id = msg.get("tool_call_id", "unknown")
+            tool_content = content or ""
+            if isinstance(tool_content, list):
+                tool_content = " ".join(
+                    item.get("text", "") if isinstance(item, dict) else str(item)
+                    for item in tool_content
+                )
+            tool_msg = {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": str(tool_content)
+                }]
+            }
+            anthropic_messages.append(tool_msg)
+            continue
+
         # 转换 content
         if isinstance(content, list):
             # OpenAI 的 multi-modal content 转为 Anthropic 格式
@@ -1975,25 +1995,6 @@ def _convert_openai_to_anthropic(body: dict) -> dict:
                     "name": func.get("name", "unknown"),
                     "input": args
                 })
-
-        # 处理 tool 角色（转为 user 消息 + tool_result）
-        if role == "tool":
-            tool_use_id = msg.get("tool_call_id", "unknown")
-            tool_content = content or ""
-            if isinstance(tool_content, list):
-                tool_content = " ".join(
-                    item.get("text", "") if isinstance(item, dict) else str(item)
-                    for item in tool_content
-                )
-            tool_msg = {
-                "role": "user",
-                "content": [{
-                    "type": "tool_result",
-                    "tool_use_id": tool_use_id,
-                    "content": str(tool_content)
-                }]
-            }
-            anthropic_messages.append(tool_msg)
 
     result["messages"] = anthropic_messages
 
