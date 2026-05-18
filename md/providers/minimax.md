@@ -2,7 +2,7 @@
 ```
     "minimax": {
       "api_base_url": "https://api.minimaxi.com/anthropic",
-      "api_key": "sk-cp-BgYFK1oZIWVhfvsS5N70jzERxXTlYSorFFZg5oobA8B46udD6zS0kzQ7cjAjZgjQDPruhXMI8inZpn2YoYDdWr0JgM2CJtz_x78DT80FIuetWFZQUXLuThw",
+      "api_key": "xxx",
       "protocol": "codeplan_anthropic",
       "providers_adapter": "minimax",
       "models": ["MiniMax-M2.7"],
