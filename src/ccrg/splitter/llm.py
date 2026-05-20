@@ -33,15 +33,18 @@ class LLMSplitter(Splitter):
         splitter_cfg = self.config.get("routing", {}).get("splitter", {})
         llm_cfg = splitter_cfg.get("llm_splitter", {})
 
-        # llm_splitter 配置：provider:model 列表
-        self.routes: list[str] = llm_cfg.get("routes", ["minimax:MiniMax-M2.7"])
-        self.system_prompt = llm_cfg.get("system_prompt", self.DEFAULT_SYSTEM_PROMPT)
-        self.user_template = llm_cfg.get("user_template", self.DEFAULT_USER_TEMPLATE)
-        self.timeout = llm_cfg.get("timeout", 10.0)
+        # llm_splitter 支持两种格式：list（直接 routes） 或 dict（带 routes key）
+        if isinstance(llm_cfg, list):
+            self.routes: list[str] = llm_cfg
+        else:
+            self.routes: list[str] = llm_cfg.get("routes", ["minimax:MiniMax-M2.7"])
+        self.system_prompt = llm_cfg.get("system_prompt", self.DEFAULT_SYSTEM_PROMPT) if isinstance(llm_cfg, dict) else self.DEFAULT_SYSTEM_PROMPT
+        self.user_template = llm_cfg.get("user_template", self.DEFAULT_USER_TEMPLATE) if isinstance(llm_cfg, dict) else self.DEFAULT_USER_TEMPLATE
+        self.timeout = llm_cfg.get("timeout", 10000.0) if isinstance(llm_cfg, dict) else 10000.0
 
         self.fallback_splitter: Splitter | None = None
 
-        logger.info(f"LLMSplitter configured: routes={self.routes}")
+        logger.info(f"[LLMSplitter] configured: routes={self.routes}")
 
     def detect_intent(self, body: dict) -> Literal["chat", "task"]:
         """使用 LLM 判断意图"""
@@ -56,15 +59,15 @@ class LLMSplitter(Splitter):
             try:
                 intent = self._call_llm(route, user_text)
                 if intent in ("chat", "task"):
-                    logger.info(f"LLMSplitter matched intent={intent} via {route}")
+                    logger.info(f"[LLMSplitter] matched intent={intent} via {route}")
                     return intent
-                logger.warning(f"LLMSplitter {route} returned invalid intent: {intent!r}")
+                logger.debug(f"[LLMSplitter] {route} returned invalid intent: {intent!r}")
             except Exception as e:
                 last_error = e
-                logger.warning(f"LLMSplitter {route} failed: {e}")
+                logger.debug(f"[LLMSplitter] {route} failed: {e}")
                 continue
 
-        logger.warning(f"LLMSplitter all routes failed, using keyword fallback")
+        logger.debug(f"[LLMSplitter] all routes failed, using keyword fallback")
         return self._keyword_fallback(body)
 
     def _call_llm(self, route: str, user_text: str) -> str:
@@ -85,8 +88,19 @@ class LLMSplitter(Splitter):
         self, provider: str, model: str, user_text: str, prov_config: Any
     ) -> str:
         """通过 registry 获取 provider 配置后调用"""
-        # 复用 main.py 中的 adapter 选择逻辑
-        adapter_name = getattr(prov_config, "providers_adapter", "") or getattr(prov_config, "protocol", "")
+        # 用 adapter 获取正确 URL
+        adapter = self._get_adapter_for_provider(provider, prov_config)
+        api_base = getattr(prov_config, "api_base_url", "")
+        api_key = getattr(prov_config, "api_key", "")
+        if not api_base or not api_key:
+            raise ValueError(f"Provider {provider} missing api_base or api_key")
+
+        prov_dict = {
+            "api_base_url": api_base,
+            "protocol": getattr(prov_config, "protocol", ""),
+            "providers_adapter": getattr(prov_config, "providers_adapter", ""),
+        }
+        target_url = adapter.get_target_url(prov_dict, model)
 
         # 构建请求
         req_body = {
@@ -99,12 +113,6 @@ class LLMSplitter(Splitter):
             "stream": False,
         }
 
-        api_base = getattr(prov_config, "api_base_url", "")
-        api_key = getattr(prov_config, "api_key", "")
-
-        if not api_base or not api_key:
-            raise ValueError(f"Provider {provider} missing api_base or api_key")
-
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
@@ -112,7 +120,7 @@ class LLMSplitter(Splitter):
         }
 
         with httpx.Client(timeout=self.timeout) as client:
-            resp = client.post(f"{api_base.rstrip('/')}/messages", json=req_body, headers=headers)
+            resp = client.post(target_url, json=req_body, headers=headers)
             resp.raise_for_status()
             data = resp.json()
 
@@ -121,7 +129,6 @@ class LLMSplitter(Splitter):
             first = content[0]
             if isinstance(first, dict):
                 text = first.get("text", "").strip().lower()
-                # 取第一行（去掉可能的解释文字）
                 first_line = text.split("\n")[0].strip()
                 if first_line in ("chat", "task"):
                     return first_line
@@ -174,6 +181,19 @@ class LLMSplitter(Splitter):
                     return first_line
                 return first_line
         return ""
+
+    def _get_adapter_for_provider(self, provider_name: str, prov_config: Any):
+        """获取 provider 对应的 adapter"""
+        adapter_name = getattr(prov_config, "providers_adapter", "") or getattr(prov_config, "protocol", "")
+        if adapter_name == "minimax":
+            from ..protocol.minimax_adapter import MiniMaxAdapter
+            return MiniMaxAdapter()
+        elif adapter_name == "openai":
+            from ..protocol.openai_adapter import OpenAIAdapter
+            return OpenAIAdapter()
+        else:
+            from ..protocol.anthropic_adapter import AnthropicAdapter
+            return AnthropicAdapter()
 
     def _keyword_fallback(self, body: dict) -> Literal["chat", "task"]:
         """当 LLM 判断失败时，回退到 keyword splitter"""
