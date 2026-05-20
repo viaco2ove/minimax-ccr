@@ -43,7 +43,7 @@ llama-index
  .gateway.json 加 trust_remote_code：
   "semantic_splitter": {
       "type": "local",
-      "model_name": "jinaai/jina-embeddings-v3",
+      "model_name": "moka-ai/m3e-small",
       "trust_remote_code": true
   }
 ```
@@ -52,6 +52,7 @@ llama-index
 针对 CCRG 意图分流场景（中文为主）：
   推荐: intfloat/multilingual-e5-small（中英文都不错，但是快）
   - 比 Qwen3 更快 + 中英都能用 + 质量别太差
+  推荐：moka-ai/m3e-small（中英均衡，使用上如果中文 80%+，速度体验非常好）
   备选:Qwen/Qwen3-Embedding-0.6B（中英文都强，但是慢）
   备选：BAAI/bge-m3
 
