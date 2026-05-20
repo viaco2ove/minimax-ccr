@@ -43,7 +43,7 @@ class LLMSplitter(Splitter):
 
         self.fallback_splitter: Splitter | None = None
 
-        logger.info(f"LLMSplitter configured: routes={self.routes}")
+        logger.info(f"[LLMSplitter] configured: routes={self.routes}")
 
     def detect(self, body: dict) -> RoutingDecision:
         """使用 LLM 判断意图并返回完整路由决策"""
@@ -57,7 +57,7 @@ class LLMSplitter(Splitter):
             try:
                 intent = self._call_llm(route, user_text)
                 if intent in ("chat", "task"):
-                    logger.info(f"LLMSplitter matched intent={intent} via {route}")
+                    logger.info(f"[LLMSplitter] matched intent={intent} via {route}")
                     route_str, fb = self._resolve_route(intent, rules)
                     return RoutingDecision(
                         intent=intent,
@@ -66,12 +66,12 @@ class LLMSplitter(Splitter):
                         matched_reason=f"route={route}",
                         fallback=fb,
                     )
-                logger.debug(f"LLMSplitter {route} returned invalid intent: {intent!r}")
+                logger.debug(f"[LLMSplitter] {route} returned invalid intent: {intent!r}")
             except Exception as e:
-                logger.debug(f"LLMSplitter {route} failed: {e}")
+                logger.debug(f"[LLMSplitter] {route} failed: {e}")
                 continue
 
-        logger.debug(f"LLMSplitter all routes failed, using keyword fallback")
+        logger.debug(f"[LLMSplitter] all routes failed, using keyword fallback")
         return self._keyword_fallback(body)
 
     def _call_llm(self, route: str, user_text: str) -> str:
