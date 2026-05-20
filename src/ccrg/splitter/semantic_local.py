@@ -38,7 +38,15 @@ class SemanticSplitterLocal(Splitter):
         self.candidates = cfg.get("candidates", self.DEFAULT_CANDIDATES)
         self._model = None  # 延迟加载 SentenceTransformer
 
-        logger.info(f"SemanticSplitterLocal configured: model={self.model_name}, threshold={self.threshold}")
+        # 从 keywords.json 预取关键词参考（用于语义匹配）
+        wflow = self.keywords.get("workflow_intent", {})
+        self._chat_keywords: list[str] = wflow.get("chat_intention", [])
+        self._task_keywords: list[str] = wflow.get("intention_analyze", [])
+        self._keyword_emb_chat: np.ndarray | None = None
+        self._keyword_emb_task: np.ndarray | None = None
+
+        logger.info(f"SemanticSplitterLocal configured: model={self.model_name}, threshold={self.threshold}, "
+                    f"chat_kws={len(self._chat_keywords)}, task_kws={len(self._task_keywords)}")
 
     def detect_intent(self, body: dict) -> Literal["chat", "task"]:
         text = self._extract_user_text(body)
@@ -48,14 +56,26 @@ class SemanticSplitterLocal(Splitter):
         model = self._load_model()
         user_emb = model.encode(text)
 
-        best, best_score = "chat", 0.0
+        scores: dict[str, float] = {}
+
+        # 1. 与 keywords.json 关键词向量比较
+        chat_emb = self._encode_keywords(model, self._chat_keywords)
+        task_emb = self._encode_keywords(model, self._task_keywords)
+        if chat_emb is not None:
+            scores["chat"] = self._cosine(user_emb, chat_emb)
+        if task_emb is not None:
+            scores["task"] = self._cosine(user_emb, task_emb)
+
+        # 2. 与候选描述向量比较
         for cand in self.candidates:
             cand_emb = model.encode(cand["description"])
             score = self._cosine(user_emb, cand_emb)
-            if score > best_score:
-                best, best_score = cand["intent"], score
+            scores[cand["intent"]] = max(scores.get(cand["intent"]), score)
 
-        logger.debug(f"SemanticSplitterLocal: best={best}({best_score:.3f})")
+        logger.debug(f"SemanticSplitterLocal scores: {scores}")
+
+        best = max(scores, key=scores.get)
+        best_score = scores[best]
 
         if best_score < self.threshold:
             return self._keyword_fallback(body)
@@ -125,6 +145,14 @@ class SemanticSplitterLocal(Splitter):
         except Exception:
             pass
         return None
+
+    def _encode_keywords(self, model, keywords: list[str]) -> np.ndarray | None:
+        """将关键词列表合并为一条文本，编码为向量"""
+        if not keywords:
+            return None
+        # 关键词用空格连接（适合短文本 embedding）
+        combined = " ".join(keywords)
+        return model.encode(combined)
 
     @staticmethod
     def _cosine(a, b) -> float:
