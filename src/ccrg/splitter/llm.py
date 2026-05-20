@@ -71,13 +71,13 @@ class LLMSplitter(Splitter):
 
         for route in self.routes:
             try:
-                logger.debug(f"[LLMSplitter]_call_llm start")
+                verbose_log("LLMSplitter", "_call_llm start", "LLM_SPLITTER_DEBUG")
                 result = self._call_llm(route, user_content)
-                logger.debug(f"[LLMSplitter]_call_llm end, result length={len(result) if result else 0}")
+                verbose_log("LLMSplitter", f"_call_llm end, result length={len(result) if result else 0}", "LLM_SPLITTER_DEBUG")
                 if result:
-                    logger.debug(f"[LLMSplitter] result preview: {result[:200] if len(result) > 200 else result}")
+                    verbose_log("LLMSplitter", f"result preview: {result[:200] if len(result) > 200 else result}", "LLM_SPLITTER_DEBUG")
                     matched = self._parse_llm_response(result)
-                    logger.debug(f"[LLMSplitter] parsed matched: {matched}")
+                    verbose_log("LLMSplitter", f"parsed matched: {matched}", "LLM_SPLITTER_DEBUG")
                     # matched 可能是空 dict，也是有效结果（没命中任何 workflow 关键词）
                     route_str, fb, intent = self._resolve_route_from_keywords(matched)
                     return RoutingDecision(
@@ -87,31 +87,31 @@ class LLMSplitter(Splitter):
                         matched_reason=f"keywords={matched}" if matched else "no_match",
                         fallback=fb,
                     )
-                logger.debug(f"[LLMSplitter] {route} returned empty result")
+                verbose_log("LLMSplitter", f"{route} returned empty result", "LLM_SPLITTER_DEBUG")
             except Exception as e:
                 import traceback
-                logger.debug(f"[LLMSplitter] {route} failed: {e}\n{traceback.format_exc()}")
+                verbose_log("LLMSplitter", f"{route} failed: {e}\n{traceback.format_exc()}", "LLM_SPLITTER_DEBUG")
                 continue
 
-        logger.debug(f"[LLMSplitter] all routes failed, using keyword fallback")
+        verbose_log("LLMSplitter", "all routes failed, using keyword fallback", "LLM_SPLITTER_DEBUG")
         return self._keyword_fallback(body)
 
     def _parse_llm_response(self, text: str) -> dict:
         """解析 LLM 返回的 JSON，返回 workflow_intent（可能为空 dict）"""
         text = text.strip()
-        logger.debug(f"[LLMSplitter] _parse_llm_response input: {text[:300] if len(text) > 300 else text}")
+        verbose_log("LLMSplitter", f"_parse_llm_response input: {text[:300] if len(text) > 300 else text}", "LLM_SPLITTER_DEBUG")
         json_match = re.search(r'\{[\s\S]*\}', text)
         if not json_match:
-            logger.debug(f"[LLMSplitter] no JSON found in response")
+            verbose_log("LLMSplitter", "no JSON found in response", "LLM_SPLITTER_DEBUG")
             return {}
         try:
             data = json.loads(json_match.group())
-            logger.debug(f"[LLMSplitter] parsed JSON keys: {list(data.keys())}")
+            verbose_log("LLMSplitter", f"parsed JSON keys: {list(data.keys())}", "LLM_SPLITTER_DEBUG")
             result = data.get("workflow_intent", {})
-            logger.debug(f"[LLMSplitter] workflow_intent: {result}")
+            verbose_log("LLMSplitter", f"workflow_intent: {result}", "LLM_SPLITTER_DEBUG")
             return result if result else {}
         except json.JSONDecodeError as e:
-            logger.debug(f"[LLMSplitter] JSON parse error: {e}")
+            verbose_log("LLMSplitter", f"JSON parse error: {e}", "LLM_SPLITTER_DEBUG")
             return {}
 
     def _resolve_route_from_keywords(self, matched: dict) -> tuple[str, list[str] | None, str]:
@@ -178,9 +178,9 @@ class LLMSplitter(Splitter):
         }
         target_url = adapter.get_target_url(prov_dict, model)
 
-        logger.debug(f"[LLMSplitter]_build_messages start")
+        verbose_log("LLMSplitter", "_build_messages start", "LLM_SPLITTER_DEBUG")
         messages = self._build_messages(user_content)
-        logger.debug(f"[LLMSplitter]_build_messages end")
+        verbose_log("LLMSplitter", "_build_messages end", "LLM_SPLITTER_DEBUG")
         req_body = {
             "model": model,
             "messages": messages,
@@ -200,7 +200,7 @@ class LLMSplitter(Splitter):
         for k, v in headers.items():
             curl_cmd += f"-H {shlex.quote(f'{k}: {v}')} "
         curl_cmd += f"-d {shlex.quote(json.dumps(req_body, ensure_ascii=False))}"
-        logger.debug(f"[LLMSplitter][curl]\n{curl_cmd}")
+        verbose_log("LLMSplitter", f"[curl]\n{curl_cmd}", "LLM_SPLITTER_CURL")
 
         with httpx.Client(timeout=self.timeout) as client:
             resp = client.post(target_url, json=req_body, headers=headers)
@@ -252,7 +252,7 @@ class LLMSplitter(Splitter):
         for k, v in headers.items():
             curl_cmd += f"-H {shlex.quote(f'{k}: {v}')} "
         curl_cmd += f"-d {shlex.quote(json.dumps(req_body, ensure_ascii=False))}"
-        logger.debug(f"[LLMSplitter][curl]\n{curl_cmd}")
+        verbose_log("LLMSplitter", f"[curl]\n{curl_cmd}", "LLM_SPLITTER_CURL")
 
         with httpx.Client(timeout=self.timeout) as client:
             resp = client.post(target_url, json=req_body, headers=headers)

@@ -92,22 +92,23 @@ class SemanticSplitterLocal(Splitter):
         return result
 
     def _resolve_route_from_keywords(self, matched: dict) -> tuple[str, list[str] | None, str]:
-        """根据命中关键词从 keyword_routing.rules 找路由"""
+        """根据命中关键词从 keyword_routing.rules 找路由，和 llm_splitter 逻辑一致"""
         rules = self.config.get("routing", {}).get("keyword_routing", {}).get("rules", [])
 
-        chat_matched = matched.get("chat_intention", [])
-        task_matched = matched.get("intention_analyze", [])
+        # 合并所有命中的关键词
+        all_matched_kws = []
+        for kws in matched.values():
+            all_matched_kws.extend(kws)
 
-        if len(task_matched) > len(chat_matched):
-            intent = "task"
-            matched_kws = task_matched
-        else:
-            intent = "chat"
-            matched_kws = chat_matched if chat_matched else task_matched
+        # 判断意图：task_keywords 命中多则 task，否则 chat
+        task_count = len(matched.get("intention_analyze", [])) + len(matched.get("problem_analyze", []))
+        chat_count = len(matched.get("chat_intention", []))
+        intent = "task" if task_count > chat_count else "chat"
 
+        # 用所有命中关键词去 rules 里匹配
         for rule in rules:
             rule_kws = rule.get("keywords", [])
-            if any(kw in rule_kws for kw in matched_kws):
+            if any(kw in rule_kws for kw in all_matched_kws):
                 route = rule.get("route", "")
                 fb = rule.get("fallback", [])
                 return route, fb if fb else None, intent

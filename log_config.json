@@ -2,5 +2,7 @@
   "TRANSLATOR_VERBOSE": false,
   "TRANSLATOR_CONVERT_CHUNKS": false,
   "TRANSLATOR_CONVERTER": false,
-  "SSE_CLIENT": false
+  "SSE_CLIENT": false,
+  "LLM_SPLITTER_DEBUG": false,
+  "LLM_SPLITTER_CURL": false
 }
