@@ -25,6 +25,7 @@ from .provider.registry import ProviderRegistry
 from .router import RoutingEngine
 from .router.fallback import FallbackRouter
 from .splitter.workflow import WorkflowSplitter
+from .splitter import Splitter, SplitterFactory
 from .types import GatewayConfig, ProviderConfig, RequestTags
 from .usage_stats import get_usage_stats
 
@@ -55,7 +56,7 @@ _routing_engine: RoutingEngine | None = None
 _usage_stats = None
 _classifier_scenario = ScenarioClassifier()
 _classifier_tool = ToolTypeClassifier()
-_workflow_splitter: WorkflowSplitter | None = None
+_workflow_splitter: Splitter | None = None
 _provider_semaphores: dict[str, asyncio.Semaphore] = {}
 _provider_last_request_time: dict[str, float] = {}
 
@@ -232,7 +233,16 @@ def init_app(config_path: str | None = None) -> FastAPI:
     _registry = ProviderRegistry(_config)
     _routing_engine = RoutingEngine(_config)
     _usage_stats = get_usage_stats(_config)
-    _workflow_splitter = WorkflowSplitter(_config.keywords)
+
+    # 创建 splitter（根据配置选择 active_strategy）
+    splitter_cfg = _config.routing.get("splitter", {})
+    active_strategy = splitter_cfg.get("active_strategy", "keyword_splitter")
+    _workflow_splitter = SplitterFactory.create(
+        active_strategy=active_strategy,
+        config=_config.__dict__ if hasattr(_config, "__dict__") else {},
+        keywords=_config.keywords,
+        registry=_registry,
+    )
 
     # 初始化 per-provider 并发控制信号量
     global _provider_semaphores
@@ -937,6 +947,10 @@ def _classify_request(request: dict) -> RequestTags:
 
 def _detect_workflow_intent(body: dict, keywords: dict) -> str:
     """基于 keywords.json 检测工作流意图：chat 或 task"""
+    global _workflow_splitter
+    if _workflow_splitter is not None:
+        return _workflow_splitter.detect_intent(body)
+    # Fallback: 旧逻辑（不应该走到这里）
     splitter = WorkflowSplitter(keywords)
     return splitter.detect_intent(body)
 
