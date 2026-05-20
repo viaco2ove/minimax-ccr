@@ -21,10 +21,11 @@ class SemanticSplitter(Splitter):
 
     DEFAULT_THRESHOLD = 0.6
 
-    def __init__(self, config: dict[str, Any] | None, keywords: dict, registry: Any = None):
+    def __init__(self, config: dict[str, Any] | None, keywords: dict, registry: Any = None, usage_stats: Any = None):
         self.config = config or {}
         self.keywords = keywords
         self.registry = registry
+        # usage_stats 不用于 semantic
 
         splitter_cfg = self.config.get("routing", {}).get("splitter", {})
         sem_cfg = splitter_cfg.get("semantic_splitter", {})
@@ -68,7 +69,7 @@ class SemanticSplitter(Splitter):
         )
 
     def _match_keywords(self, user_emb: list[float]) -> dict:
-        """计算用户输入与每个关键词的相似度，返回命中的关键词"""
+        """计算用户输入与每个关键词的相似度，返回每个 category 相似度最高的关键词"""
         result = {}
 
         wflow = self.keywords.get("workflow_intent", {})
@@ -79,17 +80,23 @@ class SemanticSplitter(Splitter):
             if not kw_list:
                 continue
 
-            matched_kws = []
+            # 计算所有关键词的相似度
+            scores = []
             for kw in kw_list:
                 kw_emb = self._get_embedding(kw)
                 if kw_emb is None:
                     continue
                 score = self._cosine(user_emb, kw_emb)
-                if score >= self.threshold:
-                    matched_kws.append(kw)
+                scores.append((kw, score))
 
-            if matched_kws:
-                result[category] = matched_kws
+            # 按相似度降序排序，取最高分
+            scores.sort(key=lambda x: x[1], reverse=True)
+
+            # 只取相似度最高且超过阈值的关键词（最多 3 个）
+            top_kws = [kw for kw, score in scores[:3] if score >= self.threshold]
+
+            if top_kws:
+                result[category] = top_kws
 
         return result
 

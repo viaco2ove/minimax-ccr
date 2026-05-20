@@ -17,9 +17,10 @@ logger = logging.getLogger("ccrg")
 class SemanticSplitterLocal(Splitter):
     """使用本地 sentence-transformers 模型做语义分流"""
 
-    def __init__(self, config: dict[str, Any] | None, keywords: dict, registry: Any = None):
+    def __init__(self, config: dict[str, Any] | None, keywords: dict, registry: Any = None, usage_stats: Any = None):
         self.keywords = keywords
         self.config = config or {}
+        # usage_stats 不用于 semantic_local
 
         cfg = self.config.get("routing", {}).get("splitter", {}).get("semantic_splitter", {})
         self.model_name = cfg.get("model_name", "BAAI/bge-m3")
@@ -37,6 +38,7 @@ class SemanticSplitterLocal(Splitter):
 
     def detect(self, body: dict) -> RoutingDecision:
         """基于语义向量匹配关键词并返回路由决策"""
+        logger.debug(f"[SemanticSplitterLocal] body: {body}")
         text = self._extract_user_text(body)
         if not text.strip():
             return self._keyword_fallback(body)
@@ -47,7 +49,7 @@ class SemanticSplitterLocal(Splitter):
         # 遍历所有关键词，计算相似度，找出命中的关键词
         matched = self._match_keywords(model, user_emb)
 
-        logger.info(f"[SemanticSplitterLocal] matched: {matched}")
+        logger.debug(f"[SemanticSplitterLocal] matched: {matched}")
 
         # 根据命中关键词解析路由
         route_str, fb, intent = self._resolve_route_from_keywords(matched)
@@ -60,7 +62,7 @@ class SemanticSplitterLocal(Splitter):
         )
 
     def _match_keywords(self, model, user_emb: np.ndarray) -> dict:
-        """计算用户输入与每个关键词的相似度，返回命中的关键词"""
+        """计算用户输入与每个关键词的相似度，返回每个 category 相似度最高的关键词"""
         result = {}
 
         wflow = self.keywords.get("workflow_intent", {})
@@ -71,15 +73,21 @@ class SemanticSplitterLocal(Splitter):
             if not kw_list:
                 continue
 
-            matched_kws = []
+            # 计算所有关键词的相似度
+            scores = []
             for kw in kw_list:
                 kw_emb = model.encode(kw)
                 score = self._cosine(user_emb, kw_emb)
-                if score >= self.threshold:
-                    matched_kws.append(kw)
+                scores.append((kw, score))
 
-            if matched_kws:
-                result[category] = matched_kws
+            # 按相似度降序排序，取最高分
+            scores.sort(key=lambda x: x[1], reverse=True)
+
+            # 只取相似度最高且超过阈值的关键词（最多 3 个）
+            top_kws = [kw for kw, score in scores[:3] if score >= self.threshold]
+
+            if top_kws:
+                result[category] = top_kws
 
         return result
 

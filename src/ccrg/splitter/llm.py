@@ -40,10 +40,11 @@ class LLMSplitter(Splitter):
 }}
 </instruction>"""
 
-    def __init__(self, config: dict[str, Any] | None, keywords: dict, registry: Any = None):
+    def __init__(self, config: dict[str, Any] | None, keywords: dict, registry: Any = None, usage_stats: Any = None):
         self.config = config or {}
         self.keywords = keywords
         self.registry = registry
+        self.usage_stats = usage_stats
 
         splitter_cfg = self.config.get("routing", {}).get("splitter", {})
         llm_cfg = splitter_cfg.get("llm_splitter", {})
@@ -206,6 +207,9 @@ class LLMSplitter(Splitter):
             resp.raise_for_status()
             data = resp.json()
 
+        # 记录 usage
+        self._record_usage(provider, model, data)
+
         content = data.get("content", [])
         if isinstance(content, list) and content:
             for block in content:
@@ -255,12 +259,32 @@ class LLMSplitter(Splitter):
             resp.raise_for_status()
             data = resp.json()
 
+        # 记录 usage
+        self._record_usage(provider, model, data)
+
         content = data.get("content", [])
         if isinstance(content, list) and content:
             for block in content:
                 if isinstance(block, dict) and block.get("type") == "text":
                     return block.get("text", "")
         return ""
+
+    def _record_usage(self, provider: str, model: str, resp_data: dict):
+        """记录 LLM 调用消耗到 usage_stats"""
+        if not self.usage_stats:
+            return
+        usage = resp_data.get("usage", {})
+        input_tokens = usage.get("input_tokens", 0)
+        output_tokens = usage.get("output_tokens", 0)
+        self.usage_stats.record(
+            provider=provider,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            latency_ms=0,
+            success=True,
+            route_rule="llm_splitter",
+        )
 
     def _get_adapter_for_provider(self, provider_name: str, prov_config: Any):
         adapter_name = getattr(prov_config, "providers_adapter", "") or getattr(prov_config, "protocol", "")

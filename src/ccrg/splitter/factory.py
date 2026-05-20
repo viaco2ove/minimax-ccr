@@ -39,6 +39,7 @@ class SplitterFactory:
         config: dict[str, Any],
         keywords: dict,
         registry: Any = None,
+        usage_stats: Any = None,
     ) -> Splitter:
         """创建 splitter 实例
 
@@ -47,6 +48,7 @@ class SplitterFactory:
             config: gateway 配置字典（包含 splitter 配置）
             keywords: keywords.json 内容
             registry: ProviderRegistry 实例（用于 llm_splitter 调用外部模型）
+            usage_stats: UsageStats 实例（用于记录 llm_splitter 调用消耗）
 
         Returns:
             Splitter 实例
@@ -62,7 +64,7 @@ class SplitterFactory:
             )
             builder = cls._BUILDERS["keyword_splitter"]
 
-        splitter = builder(config=config, keywords=keywords, registry=registry)
+        splitter = builder(config=config, keywords=keywords, registry=registry, usage_stats=usage_stats)
         logger.info(f"Splitter created: {active_strategy}")
         return splitter
 
