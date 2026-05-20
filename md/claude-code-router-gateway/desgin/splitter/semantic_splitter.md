@@ -104,11 +104,7 @@
 # 2. 重启 CCRG
 python -m src.ccrg.main
 
-# 3. 观察日志中的意图检测结果
-# 应该有类似输出：
-# SemanticSplitter: intent scores: {'task': 0.73, 'chat': 0.21}
-# SemanticSplitter matched intent=task (score=0.73)
-```
+
 
 ## 调试
 
@@ -122,3 +118,14 @@ python -m src.ccrg.main
 
 agent 设计 类似llm 分流器
 [llm_splitter.md](llm_splitter.md)
+
+返回
+```
+{
+  "workflow_intent": {
+    "chat_intention": [
+      "咋样"
+    ]
+}
+```
+如果返回的不是josn 直接当作分析失败
