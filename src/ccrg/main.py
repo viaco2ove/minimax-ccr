@@ -24,6 +24,7 @@ from .classifier.keyword import KeywordClassifier
 from .provider.registry import ProviderRegistry
 from .router import RoutingEngine
 from .router.fallback import FallbackRouter
+from .splitter.workflow import WorkflowSplitter
 from .types import GatewayConfig, ProviderConfig, RequestTags
 from .usage_stats import get_usage_stats
 
@@ -54,6 +55,7 @@ _routing_engine: RoutingEngine | None = None
 _usage_stats = None
 _classifier_scenario = ScenarioClassifier()
 _classifier_tool = ToolTypeClassifier()
+_workflow_splitter: WorkflowSplitter | None = None
 _provider_semaphores: dict[str, asyncio.Semaphore] = {}
 _provider_last_request_time: dict[str, float] = {}
 
@@ -224,12 +226,13 @@ setInterval(loadStats,30000);
 
 def init_app(config_path: str | None = None) -> FastAPI:
     """初始化 FastAPI 应用"""
-    global _config, _registry, _routing_engine, _usage_stats, app
+    global _config, _registry, _routing_engine, _usage_stats, app, _workflow_splitter
 
     _config = load_config(config_path)
     _registry = ProviderRegistry(_config)
     _routing_engine = RoutingEngine(_config)
     _usage_stats = get_usage_stats(_config)
+    _workflow_splitter = WorkflowSplitter(_config.keywords)
 
     # 初始化 per-provider 并发控制信号量
     global _provider_semaphores
@@ -934,45 +937,8 @@ def _classify_request(request: dict) -> RequestTags:
 
 def _detect_workflow_intent(body: dict, keywords: dict) -> str:
     """基于 keywords.json 检测工作流意图：chat 或 task"""
-    workflow_keywords = keywords.get("workflow_intent", {})
-    chat_keywords = workflow_keywords.get("chat_intention", [])
-    task_keywords = workflow_keywords.get("intention_analyze", [])
-
-    # 收集用户消息文本
-    user_texts = []
-    for msg in body.get("messages", []):
-        role = msg.get("role", "")
-        if role != "user":
-            continue
-        content = msg.get("content", "")
-        if isinstance(content, str):
-            user_texts.append(content)
-        elif isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    user_texts.append(block.get("text", ""))
-
-    user_text = " ".join(user_texts).lower()
-
-    # 计算命中
-    chat_score = sum(1 for kw in chat_keywords if kw.lower() in user_text)
-    task_score = sum(1 for kw in task_keywords if kw.lower() in user_text)
-
-    logger.debug(f"Workflow intent detection: chat={chat_score}, task={task_score}")
-
-    if task_score > chat_score:
-        if task_score > 0:
-            matched = [kw for kw in task_keywords if kw.lower() in user_text]
-            logger.info(f"Matched task keywords: {matched}")
-        if chat_score > 0:
-            matched = [kw for kw in chat_keywords if kw.lower() in user_text]
-            logger.info(f"Matched chat keywords: {matched}")
-        return "task"
-    
-    if chat_score > 0:
-        matched = [kw for kw in chat_keywords if kw.lower() in user_text]
-        logger.info(f"Matched chat keywords: {matched}")
-    return "chat"
+    splitter = WorkflowSplitter(keywords)
+    return splitter.detect_intent(body)
 
 
 def _resolve_execute_route(body: dict, request_id: str) -> str:
