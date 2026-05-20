@@ -34,7 +34,7 @@ llama-index
       "active_strategy": "semantic_splitter",
       "semantic_splitter": {
           "type": "local",
-          "model_name": "shibing624/text2vec-base-chinese"
+          "model_name": "intfloat/multilingual-e5-small"
       }
 }
 ```
@@ -112,3 +112,14 @@ python -m src.ccrg.main
 
 agent 设计 类似llm 分流器
 [llm_splitter.md](llm_splitter.md)
+
+返回
+```
+{
+  "workflow_intent": {
+    "chat_intention": [
+      "咋样"
+    ]
+}
+```
+如果返回的不是josn 直接当作分析失败

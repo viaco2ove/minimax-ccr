@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 
 from .base import RoutingDecision, Splitter
+from ..log.log_controller import verbose_log
 
 logger = logging.getLogger("ccrg")
 

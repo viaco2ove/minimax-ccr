@@ -35,6 +35,8 @@ _DEFAULT_CONFIG = {
     "TRANSLATOR_CONVERT_CHUNKS": True,
     "TRANSLATOR_CONVERTER": False,
     "SSE_CLIENT": False,
+    "LLM_SPLITTER_DEBUG": False,
+    "LLM_SPLITTER_CURL": False,
 }
 
 
