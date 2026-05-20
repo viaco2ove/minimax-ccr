@@ -1,38 +1,30 @@
 """
-SemanticSplitter — 基于语义向量的工作流意图分流器。
+SemanticSplitter — 基于语义向量的工作流意图分流器（API 版）。
 
-使用 embedding 模型将用户输入转为向量，与预定义的意图候选做余弦相似度匹配。
-依赖配置中的 embedding 端点和候选 intent 定义。
+使用外部 embedding API 获取向量，通过余弦相似度判断意图并返回路由。
+取代 keyword_routing。
 """
 
 import json
 import logging
 import math
-from typing import Any, Literal
+from typing import Any
 
 import httpx
 
-from .base import Splitter
+from .base import RoutingDecision, Splitter
 
 logger = logging.getLogger("ccrg")
 
 
 class SemanticSplitter(Splitter):
-    """基于语义向量相似度检测工作流意图：chat 或 task"""
+    """基于语义向量相似度检测意图并返回路由 — 取代 keyword_routing"""
 
-    # 默认意图候选（可由配置覆盖）
     DEFAULT_CANDIDATES = [
-        {
-            "intent": "task",
-            "description": "代码开发、任务规划、分析执行、问题解决等目的明确的工作",
-        },
-        {
-            "intent": "chat",
-            "description": "日常闲聊、问答、解释说明等非任务导向的对话",
-        },
+        {"intent": "task", "description": "代码开发、任务规划、分析执行、问题解决等目的明确的工作"},
+        {"intent": "chat", "description": "日常闲聊、问答、解释说明等非任务导向的对话"},
     ]
 
-    # 相似度阈值：低于此值则回退到 keyword fallback
     DEFAULT_THRESHOLD = 0.6
 
     def __init__(self, config: dict[str, Any] | None, keywords: dict, registry: Any = None):
@@ -40,68 +32,76 @@ class SemanticSplitter(Splitter):
         self.keywords = keywords
         self.registry = registry
 
-        # 从配置读取 splitter 配置
         splitter_cfg = self.config.get("routing", {}).get("splitter", {})
         sem_cfg = splitter_cfg.get("semantic_splitter", {})
-        self.embedding_provider = sem_cfg.get("embedding_provider", "minimax")
-        self.embedding_model = sem_cfg.get("embedding_model", "embo-01")
         self.embedding_api = sem_cfg.get("embedding_api", "")
         self.embedding_api_key = sem_cfg.get("embedding_api_key", "")
-
         self.candidates = splitter_cfg.get("candidates", self.DEFAULT_CANDIDATES)
         self.threshold = splitter_cfg.get("threshold", self.DEFAULT_THRESHOLD)
         self.fallback_splitter: Splitter | None = None
 
+        # 从 keywords.json 预取关键词
+        wflow = self.keywords.get("workflow_intent", {})
+        self._chat_keywords: list[str] = wflow.get("chat_intention", [])
+        self._task_keywords: list[str] = wflow.get("intention_analyze", [])
+
         if self.embedding_api:
-            logger.info(
-                f"SemanticSplitter configured: embedding={self.embedding_provider}:{self.embedding_model}, "
-                f"threshold={self.threshold}, candidates={len(self.candidates)}"
-            )
+            logger.info(f"SemanticSplitter configured: api={self.embedding_api}, threshold={self.threshold}")
         else:
             logger.warning("SemanticSplitter: no embedding_api configured, will use keyword fallback")
 
-    def detect_intent(self, body: dict) -> Literal["chat", "task"]:
-        """基于语义向量相似度检测意图"""
+    def detect(self, body: dict) -> RoutingDecision:
+        """基于语义向量匹配意图并返回路由决策"""
         user_text = self._extract_user_text(body)
         if not user_text.strip():
-            logger.debug("SemanticSplitter: empty user text, using keyword fallback")
             return self._keyword_fallback(body)
 
-        # 获取 embedding
         emb = self._get_embedding(user_text)
         if emb is None:
             return self._keyword_fallback(body)
 
-        # 计算与每个候选的相似度
         scores: dict[str, float] = {}
+
+        # 1. 与 keywords.json 关键词向量比较
+        chat_emb = self._get_embedding(" ".join(self._chat_keywords))
+        task_emb = self._get_embedding(" ".join(self._task_keywords))
+        if chat_emb is not None:
+            scores["chat"] = self._cosine(emb, chat_emb)
+        if task_emb is not None:
+            scores["task"] = self._cosine(emb, task_emb)
+
+        # 2. 与候选描述向量比较
         for cand in self.candidates:
             cand_emb = self._get_candidate_embedding(cand)
             if cand_emb is not None:
-                sim = self._cosine_similarity(emb, cand_emb)
-                scores[cand["intent"]] = sim
+                score = self._cosine(emb, cand_emb)
+                scores[cand["intent"]] = max(scores.get(cand["intent"]), score)
             else:
-                scores[cand["intent"]] = 0.0
+                scores[cand["intent"]] = scores.get(cand["intent"], 0.0)
 
-        logger.debug(f"SemanticSplitter intent scores: {scores}")
+        logger.debug(f"SemanticSplitter scores: {scores}")
 
-        best_intent = max(scores, key=scores.get)
-        best_score = scores.get(best_intent, 0.0)
+        best = max(scores, key=scores.get)
+        best_score = scores[best]
 
         if best_score < self.threshold:
-            logger.info(
-                f"SemanticSplitter best_score={best_score:.3f} < threshold={self.threshold}, "
-                f"falling back to keyword splitter"
-            )
             return self._keyword_fallback(body)
 
-        logger.info(f"SemanticSplitter matched intent={best_intent} (score={best_score:.3f})")
-        return best_intent
+        logger.info(f"SemanticSplitter matched intent={best} (score={best_score:.3f})")
+
+        rules = self.config.get("routing", {}).get("keyword_routing", {}).get("rules", [])
+        route, fallback = self._resolve_route(best, rules)
+        return RoutingDecision(
+            intent=best,
+            route=route,
+            matched_rule="semantic_routing",
+            matched_reason=f"score={best_score:.3f}",
+            fallback=fallback,
+        )
 
     def _get_embedding(self, text: str) -> list[float] | None:
-        """调用 embedding API 获取文本向量"""
         if not self.embedding_api:
             return None
-
         try:
             payload = {"texts": [text]}
             headers = {
@@ -113,8 +113,6 @@ class SemanticSplitter(Splitter):
                 resp.raise_for_status()
                 data = resp.json()
 
-            # 解析不同 embedding API 的响应格式
-            # 支持 MiniMax / OpenAI 兼容格式
             embeddings = data.get("data") or data.get("embeddings") or []
             if embeddings and isinstance(embeddings, list):
                 first = embeddings[0]
@@ -123,19 +121,16 @@ class SemanticSplitter(Splitter):
                 elif isinstance(first, list):
                     return first
             return None
-
         except Exception as e:
             logger.warning(f"SemanticSplitter embedding failed: {e}")
             return None
 
     def _get_candidate_embedding(self, candidate: dict) -> list[float] | None:
-        """获取候选意图的预存 embedding（通过 description 实时生成）"""
         desc = candidate.get("description", "")
         return self._get_embedding(desc)
 
     @staticmethod
-    def _cosine_similarity(a: list[float], b: list[float]) -> float:
-        """计算余弦相似度"""
+    def _cosine(a: list[float], b: list[float]) -> float:
         if len(a) != len(b) or not a:
             return 0.0
         dot = sum(x * y for x, y in zip(a, b))
@@ -145,30 +140,35 @@ class SemanticSplitter(Splitter):
             return 0.0
         return dot / (norm_a * norm_b)
 
-    def _keyword_fallback(self, body: dict) -> Literal["chat", "task"]:
-        """当 semantic 匹配失败时，回退到 keyword splitter"""
-        if self.fallback_splitter is None:
-            from .keyword import KeywordSplitter
+    def _resolve_route(self, intent: str, rules: list[dict]) -> tuple[str, list[str] | None]:
+        kw_map = {"chat": "chat_intention", "task": "intention_analyze"}
+        target_kw_group = kw_map.get(intent, "")
+        for rule in rules:
+            rule_kws = rule.get("keywords", [])
+            wflow = self.keywords.get("workflow_intent", {})
+            group_kws = wflow.get(target_kw_group, [])
+            if any(kw in rule_kws for kw in group_kws):
+                route = rule.get("route", "")
+                fb = rule.get("fallback", [])
+                return route, fb if fb else None
+        default = self.config.get("routing", {}).get("default", "minimax:MiniMax-M2.7")
+        return default, None
 
-            self.fallback_splitter = KeywordSplitter(
-                config=self.config,
-                keywords=self.keywords,
-                registry=self.registry,
-            )
-        return self.fallback_splitter.detect_intent(body)
+    def _keyword_fallback(self, body: dict) -> RoutingDecision:
+        from .keyword import KeywordSplitter
+        k = KeywordSplitter(config=self.config, keywords=self.keywords)
+        return k.detect(body)
 
     def _extract_user_text(self, body: dict) -> str:
-        """提取用户消息文本"""
         texts = []
         for msg in body.get("messages", []):
-            role = msg.get("role", "")
-            if role != "user":
+            if msg.get("role") != "user":
                 continue
-            content = msg.get("content", "")
-            if isinstance(content, str):
-                texts.append(content)
-            elif isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        texts.append(block.get("text", ""))
+            c = msg.get("content", "")
+            if isinstance(c, str):
+                texts.append(c)
+            elif isinstance(c, list):
+                for b in c:
+                    if isinstance(b, dict) and b.get("type") == "text":
+                        texts.append(b.get("text", ""))
         return " ".join(texts)
