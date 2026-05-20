@@ -46,7 +46,7 @@ src/ccrg/splitter
 
 ```
 "splitter": {
-      "active_strategy": "semantic_splitter"
+      "active_strategy": "semantic_splitter",
       "llm_splitter":["minimax:MiniMax-M2.7","qianfan:qianfan-code-latest"]
 }
 ```
