@@ -26,6 +26,7 @@ from .router import RoutingEngine
 from .router.fallback import FallbackRouter
 from .splitter.workflow import WorkflowSplitter
 from .splitter import Splitter, SplitterFactory
+from .splitter.base import RoutingDecision
 from .types import GatewayConfig, ProviderConfig, RequestTags
 from .usage_stats import get_usage_stats
 
@@ -945,14 +946,18 @@ def _classify_request(request: dict) -> RequestTags:
     return tags
 
 
-def _detect_workflow_intent(body: dict, keywords: dict) -> str:
-    """基于 keywords.json 检测工作流意图：chat 或 task"""
+def _detect_workflow_intent(body: dict, keywords: dict) -> RoutingDecision:
+    """基于 splitter 检测工作流意图，返回完整路由决策"""
     global _workflow_splitter
     if _workflow_splitter is not None:
-        return _workflow_splitter.detect_intent(body)
+        return _workflow_splitter.detect(body)
     # Fallback: 旧逻辑（不应该走到这里）
+    from .splitter.workflow import WorkflowSplitter
     splitter = WorkflowSplitter(keywords)
-    return splitter.detect_intent(body)
+    # 旧 WorkflowSplitter 返回 str，需要包装
+    intent = splitter.detect_intent(body)
+    default = "minimax:MiniMax-M2.7"
+    return RoutingDecision(intent=intent, route=default, matched_rule="workflow_splitter_fallback")
 
 
 def _resolve_execute_route(body: dict, request_id: str) -> str:
@@ -1799,11 +1804,14 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 )
             raise
 
-    # Step 1: Intention Analysis (基于 keywords.json) - 仅用于日志和路由决策
-    intent = _detect_workflow_intent(body, _config.keywords)
+    # Step 1: Intention Analysis (基于 splitter) - 返回 RoutingDecision
+    routing_decision = _detect_workflow_intent(body, _config.keywords)
+    intent = routing_decision.intent
+    stage_route = routing_decision.route  # splitter 返回的路由
     is_chat = (intent == "chat")
     is_user_initiated = _is_user_initiated_message(body)
-    logger.info(f"[{request_id}] Workflow intention (keyword-based): {intent}, user_initiated={is_user_initiated}")
+    logger.info(f"[{request_id}] Workflow routing decision: intent={intent}, route={stage_route}, "
+                f"matched_rule={routing_decision.matched_rule}, user_initiated={is_user_initiated}")
 
     # Step 2: CLI 驱动的分步流式交互 - CCR 只做分流+流式透传
     async def workflow_stream_generator() -> AsyncGenerator[bytes, None]:
@@ -1820,7 +1828,8 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
 
         # 2. 如果没有标注，自动判断（向后兼容）
         if not stage:
-            intent = _detect_workflow_intent(body, _config.keywords)
+            routing_decision = _detect_workflow_intent(body, _config.keywords)
+            intent = routing_decision.intent
             is_chat = (intent == "chat")
             is_user_initiated = _is_user_initiated_message(body)
             

@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 import numpy as np
 
-from .base import Splitter
+from .base import RoutingDecision, Splitter
 
 logger = logging.getLogger("ccrg")
 
@@ -48,7 +48,8 @@ class SemanticSplitterLocal(Splitter):
         logger.info(f"SemanticSplitterLocal configured: model={self.model_name}, threshold={self.threshold}, "
                     f"chat_kws={len(self._chat_keywords)}, task_kws={len(self._task_keywords)}")
 
-    def detect_intent(self, body: dict) -> Literal["chat", "task"]:
+    def detect(self, body: dict) -> RoutingDecision:
+        """基于语义向量匹配意图并返回路由决策"""
         text = self._extract_user_text(body)
         if not text.strip():
             return self._keyword_fallback(body)
@@ -81,7 +82,31 @@ class SemanticSplitterLocal(Splitter):
             return self._keyword_fallback(body)
 
         logger.info(f"SemanticSplitterLocal matched intent={best} (score={best_score:.3f})")
-        return best
+
+        # 解析路由
+        rules = self.config.get("routing", {}).get("keyword_routing", {}).get("rules", [])
+        route, fallback = self._resolve_route(best, rules)
+        return RoutingDecision(
+            intent=best,
+            route=route,
+            matched_rule="semantic_routing",
+            matched_reason=f"score={best_score:.3f}",
+            fallback=fallback,
+        )
+
+    def _resolve_route(self, intent: str, rules: list[dict]) -> tuple[str, list[str] | None]:
+        kw_map = {"chat": "chat_intention", "task": "intention_analyze"}
+        target_kw_group = kw_map.get(intent, "")
+        for rule in rules:
+            rule_kws = rule.get("keywords", [])
+            wflow = self.keywords.get("workflow_intent", {})
+            group_kws = wflow.get(target_kw_group, [])
+            if any(kw in rule_kws for kw in group_kws):
+                route = rule.get("route", "")
+                fb = rule.get("fallback", [])
+                return route, fb if fb else None
+        default = self.config.get("routing", {}).get("default", "minimax:MiniMax-M2.7")
+        return default, None
 
     def _load_model(self):
         if self._model is None:
@@ -162,10 +187,10 @@ class SemanticSplitterLocal(Splitter):
             return 0.0
         return float(np.dot(a, b) / (norm_a * norm_b))
 
-    def _keyword_fallback(self, body: dict) -> Literal["chat", "task"]:
+    def _keyword_fallback(self, body: dict) -> RoutingDecision:
         from .keyword import KeywordSplitter
         k = KeywordSplitter(config=self.config, keywords=self.keywords)
-        return k.detect_intent(body)
+        return k.detect(body)
 
     def _extract_user_text(self, body: dict) -> str:
         texts = []

@@ -28,17 +28,7 @@
         "embedding_provider": "minimax",
         "embedding_model": "embo-01",
         "embedding_api": "https://api.minimaxi.com/embedding",
-        "embedding_api_key": "$EMBEDDING_API_KEY",
-        "candidates": [
-          {
-            "intent": "task",
-            "description": "代码开发、任务规划、分析执行、问题解决等目的明确的工作"
-          },
-          {
-            "intent": "chat",
-            "description": "日常闲聊、问答、解释说明等非任务导向的对话"
-          }
-        ],
+        "embedding_api_key": "$EMBEDDING_API_KEY"
         "threshold": 0.6
       }
     }
@@ -130,8 +120,5 @@ python -m src.ccrg.main
 }
 ```
 
-日志输出示例：
-```
-[ccrg] SemanticSplitter: intent scores: {'task': 0.68, 'chat': 0.31}
-[ccrg] SemanticSplitter matched intent=task (score=0.683)
-```
+agent 设计 类似llm 分流器
+[llm_splitter.md](llm_splitter.md)
