@@ -38,7 +38,6 @@ class SemanticSplitter(Splitter):
         self.embedding_api_key = sem_cfg.get("embedding_api_key", "")
         self.candidates = splitter_cfg.get("candidates", self.DEFAULT_CANDIDATES)
         self.threshold = splitter_cfg.get("threshold", self.DEFAULT_THRESHOLD)
-        self.fallback_splitter: Splitter | None = None
 
         # 从 keywords.json 预取关键词
         wflow = self.keywords.get("workflow_intent", {})
@@ -72,31 +71,67 @@ class SemanticSplitter(Splitter):
 
         # 2. 与候选描述向量比较
         for cand in self.candidates:
-            cand_emb = self._get_candidate_embedding(cand)
-            if cand_emb is not None:
-                score = self._cosine(emb, cand_emb)
-                scores[cand["intent"]] = max(scores.get(cand["intent"]), score)
-            else:
-                scores[cand["intent"]] = scores.get(cand["intent"], 0.0)
+            if isinstance(cand, dict) and "description" in cand:
+                cand_emb = self._get_candidate_embedding(cand)
+                if cand_emb is not None:
+                    score = self._cosine(emb, cand_emb)
+                    intent = cand.get("intent", "chat")
+                    scores[intent] = max(scores.get(intent), score)
 
         logger.debug(f"SemanticSplitter scores: {scores}")
+
+        if not scores:
+            return self._build_default_decision()
 
         best = max(scores, key=scores.get)
         best_score = scores[best]
 
-        if best_score < self.threshold:
-            return self._keyword_fallback(body)
-
         logger.info(f"SemanticSplitter matched intent={best} (score={best_score:.3f})")
 
-        rules = self.config.get("routing", {}).get("keyword_routing", {}).get("rules", [])
-        route, fallback = self._resolve_route(best, rules)
+        # 根据意图解析路由
+        matched = {f"{best}_intention": ["semantic_match"]}
+        route_str, fb, intent = self._resolve_route_from_keywords(matched)
         return RoutingDecision(
             intent=best,
-            route=route,
+            route=route_str,
             matched_rule="semantic_routing",
             matched_reason=f"score={best_score:.3f}",
-            fallback=fallback,
+            fallback=fb,
+        )
+
+    def _resolve_route_from_keywords(self, matched: dict) -> tuple[str, list[str] | None, str]:
+        """根据命中关键词从 keyword_routing.rules 找路由"""
+        rules = self.config.get("routing", {}).get("keyword_routing", {}).get("rules", [])
+
+        chat_matched = matched.get("chat_intention", [])
+        task_matched = matched.get("task_intention", matched.get("intention_analyze", []))
+
+        if len(task_matched) > len(chat_matched):
+            intent = "task"
+            matched_kws = task_matched
+        else:
+            intent = "chat"
+            matched_kws = chat_matched if chat_matched else task_matched
+
+        for rule in rules:
+            rule_kws = rule.get("keywords", [])
+            if any(kw in rule_kws for kw in matched_kws):
+                route = rule.get("route", "")
+                fb = rule.get("fallback", [])
+                return route, fb if fb else None, intent
+
+        default = self.config.get("routing", {}).get("default", "minimax:MiniMax-M2.7")
+        return default, None, intent
+
+    def _build_default_decision(self) -> RoutingDecision:
+        """构建默认路由决策"""
+        default = self.config.get("routing", {}).get("default", "minimax:MiniMax-M2.7")
+        return RoutingDecision(
+            intent="chat",
+            route=default,
+            matched_rule="semantic_routing",
+            matched_reason="no_match",
+            fallback=None,
         )
 
     def _get_embedding(self, text: str) -> list[float] | None:
@@ -139,20 +174,6 @@ class SemanticSplitter(Splitter):
         if norm_a == 0 or norm_b == 0:
             return 0.0
         return dot / (norm_a * norm_b)
-
-    def _resolve_route(self, intent: str, rules: list[dict]) -> tuple[str, list[str] | None]:
-        kw_map = {"chat": "chat_intention", "task": "intention_analyze"}
-        target_kw_group = kw_map.get(intent, "")
-        for rule in rules:
-            rule_kws = rule.get("keywords", [])
-            wflow = self.keywords.get("workflow_intent", {})
-            group_kws = wflow.get(target_kw_group, [])
-            if any(kw in rule_kws for kw in group_kws):
-                route = rule.get("route", "")
-                fb = rule.get("fallback", [])
-                return route, fb if fb else None
-        default = self.config.get("routing", {}).get("default", "minimax:MiniMax-M2.7")
-        return default, None
 
     def _keyword_fallback(self, body: dict) -> RoutingDecision:
         from .keyword import KeywordSplitter

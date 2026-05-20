@@ -3,7 +3,7 @@ SemanticSplitterLocal — 本地模型版语义分流器。
 """
 
 import logging
-from typing import Any, Literal
+from typing import Any
 
 import numpy as np
 
@@ -15,46 +15,10 @@ logger = logging.getLogger("ccrg")
 class SemanticSplitterLocal(Splitter):
     """使用本地 sentence-transformers 模型做语义分流"""
 
-    DEFAULT_CANDIDATES = """
-    你是一个模型分流器。分析命中了哪些关键词？用于为claude code cli 的请求分流
-## 数据返回约束，json. 
-{
-  "workflow_intent": {
-    "chat_intention": [
-      "咋样"
+    DEFAULT_CANDIDATES = [
+        {"intent": "task", "description": "代码开发、任务规划、分析执行、问题解决等目的明确的工作"},
+        {"intent": "chat", "description": "日常闲聊、问答、解释说明等非任务导向的对话"},
     ]
-}
-代表命中了什么
-
-## keywords 数据
-{keywords.json}
-
-## 入参说明
-一般为xml 格式
-# 根节点（固定）
-<system-reminder data-role="user-context">
-  ├─ <user_info>                # 用户环境信息
-  │    ├─ OS Version: win32
-  │    ├─ Shell: bash
-  │    ├─ Workspace Folder: 路径
-  │    └─ Note: 路径使用说明
-  │
-  ├─ <project_context>          # 项目核心上下文
-  │    ├─ <project_guidance>    # 项目规范（CDATA包裹）
-  │    │    └─ 项目概述/架构/命令/规则/配置
-  │    └─ <project_layout>       # 项目文件目录结构
-  │
-  ├─ <additional_data>           # 附加数据
-  │    ├─ <current_time>         # 当前时间
-  │    └─ <connector-status>     # 服务连接状态（全disconnected）
-  │
-  └─ <memory_and_skills_reminder>  # 记忆&技能规则
-       └─ 内存写入/技能管理/通用规则
-
-# 重复嵌套结构（交互轮次）
-</system-reminder>
-<user_query>用户在cli输入的内容</user_query>
-    """
 
     def __init__(self, config: dict[str, Any] | None, keywords: dict, registry: Any = None):
         self.keywords = keywords
@@ -66,14 +30,12 @@ class SemanticSplitterLocal(Splitter):
         self.device = cfg.get("device", "cpu")
         self.trust_remote_code = cfg.get("trust_remote_code", False)
         self.candidates = cfg.get("candidates", self.DEFAULT_CANDIDATES)
-        self._model = None  # 延迟加载 SentenceTransformer
+        self._model = None
 
-        # 从 keywords.json 预取关键词参考（用于语义匹配）
+        # 从 keywords.json 预取关键词参考
         wflow = self.keywords.get("workflow_intent", {})
         self._chat_keywords: list[str] = wflow.get("chat_intention", [])
         self._task_keywords: list[str] = wflow.get("intention_analyze", [])
-        self._keyword_emb_chat: np.ndarray | None = None
-        self._keyword_emb_task: np.ndarray | None = None
 
         logger.info(f"SemanticSplitterLocal configured: model={self.model_name}, threshold={self.threshold}, "
                     f"chat_kws={len(self._chat_keywords)}, task_kws={len(self._task_keywords)}")
@@ -99,44 +61,68 @@ class SemanticSplitterLocal(Splitter):
 
         # 2. 与候选描述向量比较
         for cand in self.candidates:
-            cand_emb = model.encode(cand["description"])
-            score = self._cosine(user_emb, cand_emb)
-            scores[cand["intent"]] = max(scores.get(cand["intent"]), score)
+            if isinstance(cand, dict) and "description" in cand:
+                cand_emb = model.encode(cand["description"])
+                score = self._cosine(user_emb, cand_emb)
+                intent = cand.get("intent", "chat")
+                scores[intent] = max(scores.get(intent), score)
 
         logger.debug(f"SemanticSplitterLocal scores: {scores}")
+
+        if not scores:
+            # 没有任何匹配，用 default 路由
+            return self._build_default_decision()
 
         best = max(scores, key=scores.get)
         best_score = scores[best]
 
-        if best_score < self.threshold:
-            return self._keyword_fallback(body)
-
         logger.info(f"SemanticSplitterLocal matched intent={best} (score={best_score:.3f})")
 
-        # 解析路由
-        rules = self.config.get("routing", {}).get("keyword_routing", {}).get("rules", [])
-        route, fallback = self._resolve_route(best, rules)
+        # 根据意图解析路由
+        matched = {f"{best}_intention": ["semantic_match"]}
+        route_str, fb, intent = self._resolve_route_from_keywords(matched)
         return RoutingDecision(
             intent=best,
-            route=route,
+            route=route_str,
             matched_rule="semantic_routing",
             matched_reason=f"score={best_score:.3f}",
-            fallback=fallback,
+            fallback=fb,
         )
 
-    def _resolve_route(self, intent: str, rules: list[dict]) -> tuple[str, list[str] | None]:
-        kw_map = {"chat": "chat_intention", "task": "intention_analyze"}
-        target_kw_group = kw_map.get(intent, "")
+    def _resolve_route_from_keywords(self, matched: dict) -> tuple[str, list[str] | None, str]:
+        """根据命中关键词从 keyword_routing.rules 找路由"""
+        rules = self.config.get("routing", {}).get("keyword_routing", {}).get("rules", [])
+
+        chat_matched = matched.get("chat_intention", [])
+        task_matched = matched.get("task_intention", matched.get("intention_analyze", []))
+
+        if len(task_matched) > len(chat_matched):
+            intent = "task"
+            matched_kws = task_matched
+        else:
+            intent = "chat"
+            matched_kws = chat_matched if chat_matched else task_matched
+
         for rule in rules:
             rule_kws = rule.get("keywords", [])
-            wflow = self.keywords.get("workflow_intent", {})
-            group_kws = wflow.get(target_kw_group, [])
-            if any(kw in rule_kws for kw in group_kws):
+            if any(kw in rule_kws for kw in matched_kws):
                 route = rule.get("route", "")
                 fb = rule.get("fallback", [])
-                return route, fb if fb else None
+                return route, fb if fb else None, intent
+
         default = self.config.get("routing", {}).get("default", "minimax:MiniMax-M2.7")
-        return default, None
+        return default, None, intent
+
+    def _build_default_decision(self) -> RoutingDecision:
+        """构建默认路由决策"""
+        default = self.config.get("routing", {}).get("default", "minimax:MiniMax-M2.7")
+        return RoutingDecision(
+            intent="chat",
+            route=default,
+            matched_rule="semantic_routing",
+            matched_reason="no_match",
+            fallback=None,
+        )
 
     def _load_model(self):
         if self._model is None:
@@ -153,13 +139,11 @@ class SemanticSplitterLocal(Splitter):
                 elapsed = time.time() - start
                 logger.info(f"[SemanticSplitterLocal] 模型加载完成，耗时 {elapsed:.1f}s")
             except FileNotFoundError as e:
-                # 某些模型（如 jina-embeddings-v3）自定义代码下载不完整，清除缓存重试
                 logger.warning(f"[SemanticSplitterLocal] 模型文件缺失，尝试清除缓存重试: {e}")
                 cache_dir = self._get_model_cache_dir()
                 if cache_dir and cache_dir.exists():
                     shutil.rmtree(cache_dir, ignore_errors=True)
                     logger.info(f"[SemanticSplitterLocal] 已清除缓存: {cache_dir}")
-                # 使用 snapshot_download 完整下载
                 try:
                     from huggingface_hub import snapshot_download
                     local_path = snapshot_download(
@@ -183,14 +167,9 @@ class SemanticSplitterLocal(Splitter):
         return self._model
 
     def _get_model_cache_dir(self):
-        """获取模型缓存目录"""
         try:
             from pathlib import Path
-            from huggingface_hub import snapshot_download
-            # 尝试获取缓存路径
-            import os
             default_cache = Path.home() / ".cache" / "huggingface" / "hub"
-            # models--{org}--{model} 格式
             parts = self.model_name.split("/")
             if len(parts) == 2:
                 model_cache_name = f"models--{parts[0]}--{parts[1]}"
@@ -202,10 +181,8 @@ class SemanticSplitterLocal(Splitter):
         return None
 
     def _encode_keywords(self, model, keywords: list[str]) -> np.ndarray | None:
-        """将关键词列表合并为一条文本，编码为向量"""
         if not keywords:
             return None
-        # 关键词用空格连接（适合短文本 embedding）
         combined = " ".join(keywords)
         return model.encode(combined)
 

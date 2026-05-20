@@ -76,16 +76,16 @@ class LLMSplitter(Splitter):
                     logger.debug(f"[LLMSplitter] result preview: {result[:200] if len(result) > 200 else result}")
                     matched = self._parse_llm_response(result)
                     logger.debug(f"[LLMSplitter] parsed matched: {matched}")
-                    if matched:
-                        route_str, fb, intent = self._resolve_route_from_keywords(matched)
-                        return RoutingDecision(
-                            intent=intent,
-                            route=route_str,
-                            matched_rule="llm_routing",
-                            matched_reason=f"keywords={matched}",
-                            fallback=fb,
-                        )
-                logger.debug(f"[LLMSplitter] {route} returned invalid response")
+                    # matched 可能是空 dict，也是有效结果（没命中任何 workflow 关键词）
+                    route_str, fb, intent = self._resolve_route_from_keywords(matched)
+                    return RoutingDecision(
+                        intent=intent,
+                        route=route_str,
+                        matched_rule="llm_routing",
+                        matched_reason=f"keywords={matched}" if matched else "no_match",
+                        fallback=fb,
+                    )
+                logger.debug(f"[LLMSplitter] {route} returned empty result")
             except Exception as e:
                 import traceback
                 logger.debug(f"[LLMSplitter] {route} failed: {e}\n{traceback.format_exc()}")
