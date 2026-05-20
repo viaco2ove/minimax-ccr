@@ -1,7 +1,7 @@
 {
   "server": {
     "host": "127.0.0.1",
-    "port": 3429,
+    "port": 3428,
     "timeout_ms": 600000,
     "log_level": "debug",
     "log_file": "logs/ccrg.log",
@@ -188,7 +188,14 @@
         }
       ]
     },
-    "priority": ["scenario", "tool_routing", "keyword_routing", "default"]
+    "priority": ["scenario", "tool_routing", "keyword_routing", "default"],
+     "splitter": {
+        "active_strategy": "semantic_splitter",
+        "semantic_splitter": {
+            "type": "local",
+            "model_name": "intfloat/multilingual-e5-small"
+        }
+    }
   },
   "quota": {
     "minimax_codeplan": {
