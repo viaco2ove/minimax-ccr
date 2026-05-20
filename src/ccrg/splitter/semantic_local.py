@@ -15,16 +15,46 @@ logger = logging.getLogger("ccrg")
 class SemanticSplitterLocal(Splitter):
     """使用本地 sentence-transformers 模型做语义分流"""
 
-    DEFAULT_CANDIDATES = [
-        {
-            "intent": "task",
-            "description": "代码开发、任务规划、分析执行、问题解决等目的明确的工作",
-        },
-        {
-            "intent": "chat",
-            "description": "日常闲聊、问答、解释说明等非任务导向的对话",
-        },
+    DEFAULT_CANDIDATES = """
+    你是一个模型分流器。分析命中了哪些关键词？用于为claude code cli 的请求分流
+## 数据返回约束，json. 
+{
+  "workflow_intent": {
+    "chat_intention": [
+      "咋样"
     ]
+}
+代表命中了什么
+
+## keywords 数据
+{keywords.json}
+
+## 入参说明
+一般为xml 格式
+# 根节点（固定）
+<system-reminder data-role="user-context">
+  ├─ <user_info>                # 用户环境信息
+  │    ├─ OS Version: win32
+  │    ├─ Shell: bash
+  │    ├─ Workspace Folder: 路径
+  │    └─ Note: 路径使用说明
+  │
+  ├─ <project_context>          # 项目核心上下文
+  │    ├─ <project_guidance>    # 项目规范（CDATA包裹）
+  │    │    └─ 项目概述/架构/命令/规则/配置
+  │    └─ <project_layout>       # 项目文件目录结构
+  │
+  ├─ <additional_data>           # 附加数据
+  │    ├─ <current_time>         # 当前时间
+  │    └─ <connector-status>     # 服务连接状态（全disconnected）
+  │
+  └─ <memory_and_skills_reminder>  # 记忆&技能规则
+       └─ 内存写入/技能管理/通用规则
+
+# 重复嵌套结构（交互轮次）
+</system-reminder>
+<user_query>用户在cli输入的内容</user_query>
+    """
 
     def __init__(self, config: dict[str, Any] | None, keywords: dict, registry: Any = None):
         self.keywords = keywords
