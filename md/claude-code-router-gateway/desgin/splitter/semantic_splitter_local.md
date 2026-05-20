@@ -109,3 +109,6 @@ python -m src.ccrg.main
 ```
 
 看日志有没有报 `Local embedding model loaded` 即可。
+
+agent 设计 类似llm 分流器
+[llm_splitter.md](llm_splitter.md)
