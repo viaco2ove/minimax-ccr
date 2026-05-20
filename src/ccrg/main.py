@@ -243,6 +243,7 @@ def init_app(config_path: str | None = None) -> FastAPI:
         config=_config.__dict__ if hasattr(_config, "__dict__") else {},
         keywords=_config.keywords,
         registry=_registry,
+        usage_stats=_usage_stats,
     )
 
     # 初始化 per-provider 并发控制信号量

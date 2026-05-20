@@ -14,9 +14,10 @@ logger = logging.getLogger("ccrg")
 class KeywordSplitter(Splitter):
     """基于关键词检测工作流意图 — 取代 keyword_routing"""
 
-    def __init__(self, config: dict[str, Any] | None, keywords: dict, registry: Any = None):
+    def __init__(self, config: dict[str, Any] | None, keywords: dict, registry: Any = None, usage_stats: Any = None):
         self.keywords = keywords
         self.config = config or {}
+        # usage_stats 不用于 keyword_splitter
 
     def detect(self, body: dict) -> RoutingDecision:
         """检测用户意图并返回完整路由决策"""
