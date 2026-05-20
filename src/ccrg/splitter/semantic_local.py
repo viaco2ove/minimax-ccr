@@ -67,16 +67,64 @@ class SemanticSplitterLocal(Splitter):
         if self._model is None:
             from sentence_transformers import SentenceTransformer
             import time
+            import shutil
             start = time.time()
             logger.info(f"[SemanticSplitterLocal] 正在下载/加载模型: {self.model_name}，请稍候（首次可能较慢）...")
-            self._model = SentenceTransformer(
-                self.model_name,
-                device=self.device,
-                trust_remote_code=self.trust_remote_code,
-            )
-            elapsed = time.time() - start
-            logger.info(f"[SemanticSplitterLocal] 模型加载完成，耗时 {elapsed:.1f}s")
+            try:
+                kwargs = {"device": self.device}
+                if self.trust_remote_code:
+                    kwargs["trust_remote_code"] = True
+                self._model = SentenceTransformer(self.model_name, **kwargs)
+                elapsed = time.time() - start
+                logger.info(f"[SemanticSplitterLocal] 模型加载完成，耗时 {elapsed:.1f}s")
+            except FileNotFoundError as e:
+                # 某些模型（如 jina-embeddings-v3）自定义代码下载不完整，清除缓存重试
+                logger.warning(f"[SemanticSplitterLocal] 模型文件缺失，尝试清除缓存重试: {e}")
+                cache_dir = self._get_model_cache_dir()
+                if cache_dir and cache_dir.exists():
+                    shutil.rmtree(cache_dir, ignore_errors=True)
+                    logger.info(f"[SemanticSplitterLocal] 已清除缓存: {cache_dir}")
+                # 使用 snapshot_download 完整下载
+                try:
+                    from huggingface_hub import snapshot_download
+                    local_path = snapshot_download(
+                        repo_id=self.model_name,
+                        local_files_only=False,
+                        resume_download=False,
+                    )
+                    logger.info(f"[SemanticSplitterLocal] 完整下载到: {local_path}")
+                    kwargs = {"device": self.device}
+                    if self.trust_remote_code:
+                        kwargs["trust_remote_code"] = True
+                    self._model = SentenceTransformer(local_path, **kwargs)
+                    elapsed = time.time() - start
+                    logger.info(f"[SemanticSplitterLocal] 模型加载完成，耗时 {elapsed:.1f}s")
+                except Exception as e2:
+                    logger.error(f"[SemanticSplitterLocal] 重试后仍失败: {e2}，请更换模型（推荐 BAAI/bge-m3）")
+                    raise
+            except Exception as e:
+                logger.error(f"[SemanticSplitterLocal] 模型加载失败: {e}，请更换模型（推荐 BAAI/bge-m3 或 shibing624/text2vec-base-chinese）")
+                raise
         return self._model
+
+    def _get_model_cache_dir(self):
+        """获取模型缓存目录"""
+        try:
+            from pathlib import Path
+            from huggingface_hub import snapshot_download
+            # 尝试获取缓存路径
+            import os
+            default_cache = Path.home() / ".cache" / "huggingface" / "hub"
+            # models--{org}--{model} 格式
+            parts = self.model_name.split("/")
+            if len(parts) == 2:
+                model_cache_name = f"models--{parts[0]}--{parts[1]}"
+                cache_path = default_cache / model_cache_name
+                if cache_path.exists():
+                    return cache_path
+        except Exception:
+            pass
+        return None
 
     @staticmethod
     def _cosine(a, b) -> float:

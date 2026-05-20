@@ -11,8 +11,8 @@
 模型推荐：
 - intfloat/multilingual-e5-small（老牌稳定,老了,但依然能打，比 Qwen3 更快 + 中英都能用 + 质量别太差）
 - Qwen/Qwen3-Embedding-0.6B（中英文都强）
-- jinaai/jina-embeddings-v3（快，多语言，长文本）
-- jinaai/jina-embeddings-v3-small-ci（迷你版）
+- jinaai/jina-embeddings-v3（快，多语言，长文本，需要 trust_remote_code，下载慢.因为需求支持工具多）
+- jinaai/jina-embeddings-v3-small-ci（迷你版，需要 trust_remote_code，下载慢.因为需求支持工具多）
 - BAAI/bge-m3（比较大，速度慢）
 - BAAI/bge-small-zh-v1.5（中文为主，如果英文占比超过 20~30%，不太建议）
 - moka-ai/m3e-small（中英均衡，使用上如果中文 80%+，速度体验非常好）
@@ -37,6 +37,15 @@ llama-index
           "model_name": "shibing624/text2vec-base-chinese"
       }
 }
+```
+
+```
+ .gateway.json 加 trust_remote_code：
+  "semantic_splitter": {
+      "type": "local",
+      "model_name": "jinaai/jina-embeddings-v3",
+      "trust_remote_code": true
+  }
 ```
 
 # 本地模型配置与支持 
