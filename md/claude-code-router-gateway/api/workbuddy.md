@@ -1,9 +1,25 @@
+# Workbuddy 的配置 两种方式反复横跳？
+v1
 ```
 {
     "id": "local",
     "name": "local",
     "vendor": "Custom",
     "url": "http://127.0.0.1:3428/v1/",
+    "apiKey": "local",
+    "supportsToolCall": true,
+    "supportsImages": true,
+    "supportsReasoning": true,
+    "useCustomProtocol": true
+  }
+```
+V2（最新版是这样配置的）
+```
+{
+    "id": "local",
+    "name": "local",
+    "vendor": "Custom",
+    "url": "http://127.0.0.1:3428/v1/chat/completions",
     "apiKey": "local",
     "supportsToolCall": true,
     "supportsImages": true,

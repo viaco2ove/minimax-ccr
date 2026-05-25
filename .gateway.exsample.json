@@ -41,7 +41,7 @@
         "tool_use": true,
         "streaming": true,
         "thinking": true,
-        "vision": false,
+        "vision": true,
         "max_context": 128000
       },
       "cost_tier": "cheap",

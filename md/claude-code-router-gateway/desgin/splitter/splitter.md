@@ -46,9 +46,18 @@ src/ccrg/splitter
 
 ```
 "splitter": {
-      "active_strategy": "semantic_splitter",
+      "active_strategy": "llm_splitter",
       "llm_splitter":["minimax:MiniMax-M2.7","qianfan:qianfan-code-latest"]
 }
 ```
+```
+    "splitter": {
+          "active_strategy": "semantic_splitter",
+          "semantic_splitter": {
+              "type": "local",
+              "model_name": "moka-ai/m3e-small"
+          }
+    }
+```    
 active_strategy 选择哪一种分流器.默认是keyword_splitter
 llm_splitter 配置那个providers用于llm_splitter

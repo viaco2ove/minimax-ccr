@@ -51,7 +51,7 @@ date: 2026-05-11
         "tool_use": true,           // 是否支持 function calling / tool_use
         "streaming": true,          // 是否支持 SSE streaming
         "thinking": false,          // 是否支持 extended thinking
-        "vision": false,            // 是否支持图片输入
+        "vision": true,            // 是否支持图片输入
         "max_context": 128000       // 最大上下文 token 数
       },
 
@@ -288,7 +288,7 @@ cost_tier 不直接决定路由，但可以用于：
         "tool_use": true,
         "streaming": true,
         "thinking": false,
-        "vision": false,
+        "vision": true,
         "max_context": 128000
       },
       "cost_tier": "cheap",
@@ -306,7 +306,7 @@ cost_tier 不直接决定路由，但可以用于：
         "tool_use": true,
         "streaming": true,
         "thinking": true,
-        "vision": false,
+        "vision": true,
         "max_context": 64000
       },
       "cost_tier": "premium",

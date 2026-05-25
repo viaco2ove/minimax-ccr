@@ -41,7 +41,7 @@
         "tool_use": true,
         "streaming": true,
         "thinking": true,
-        "vision": false,
+        "vision": true,
         "max_context": 128000
       },
       "per_request_delay_ms": 1500,
@@ -61,7 +61,7 @@
         "tool_use": true,
         "streaming": true,
         "thinking": true,
-        "vision": false,
+        "vision": true,
         "max_context": 128000
       },
       "per_request_delay_ms": 500,
