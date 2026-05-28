@@ -246,6 +246,12 @@ def init_app(config_path: str | None = None) -> FastAPI:
         usage_stats=_usage_stats,
     )
 
+    # 预加载 semantic_splitter 模型（避免第一次请求时才下载）
+    if active_strategy == "semantic_splitter":
+        logger.info("[SemanticSplitterLocal] 预加载模型中...")
+        _workflow_splitter._load_model()
+        logger.info("[SemanticSplitterLocal] 模型预加载完成")
+
     # 初始化 per-provider 并发控制信号量
     global _provider_semaphores
     _provider_semaphores.clear()
@@ -479,7 +485,13 @@ async def _handle_request(request: Request) -> Response:
                     response.raise_for_status()
 
                     resp_data = response.json()
+                    # 检查空响应
+                    if not resp_data:
+                        raise ValueError(f"{prov_name} returned empty/null response")
+
                     transformed_resp = prov_adapter.transform_json_response(resp_data)
+                    if not transformed_resp:
+                        raise ValueError(f"{prov_name} transform returned empty/null response")
 
                     latency_ms = (time.time() - start_time) * 1000
 
@@ -631,6 +643,7 @@ async def _handle_streaming_with_fallback(
             headers = {
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {prov_config.api_key}",
+                "anthropic-version": "2023-06-01",
             }
 
             logger.info(f"[{request_id}] Calling {prov_name} at {target_url} (timeout={prov_timeout:.0f}s)")

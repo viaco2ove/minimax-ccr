@@ -122,14 +122,24 @@ class SemanticSplitterLocal(Splitter):
             import time
             import shutil
             start = time.time()
-            logger.info(f"[SemanticSplitterLocal] 正在下载/加载模型: {self.model_name}，请稍候（首次可能较慢）...")
+
+            # 检查本地缓存是否存在
+            cache_dir = self._get_model_cache_dir()
+            is_cached = cache_dir and cache_dir.exists()
+
+            if is_cached:
+                logger.info(f"[SemanticSplitterLocal] 正在加载模型: {self.model_name}（从本地缓存）...")
+            else:
+                logger.info(f"[SemanticSplitterLocal] 正在下载模型: {self.model_name}，请稍候（首次可能较慢）...")
+
             try:
                 kwargs = {"device": self.device}
                 if self.trust_remote_code:
                     kwargs["trust_remote_code"] = True
                 self._model = SentenceTransformer(self.model_name, **kwargs)
                 elapsed = time.time() - start
-                logger.info(f"[SemanticSplitterLocal] 模型加载完成，耗时 {elapsed:.1f}s")
+                action = "加载" if is_cached else "下载并加载"
+                logger.info(f"[SemanticSplitterLocal] 模型{action}完成，耗时 {elapsed:.1f}s")
             except FileNotFoundError as e:
                 logger.warning(f"[SemanticSplitterLocal] 模型文件缺失，尝试清除缓存重试: {e}")
                 cache_dir = self._get_model_cache_dir()
