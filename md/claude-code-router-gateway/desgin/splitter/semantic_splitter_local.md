@@ -31,13 +31,22 @@ llama-index
 .gateway.json
 
 推荐1(★★★★★)
+/env
 ```
- .gateway.json 加 trust_remote_code：
+"env": {                                                                                                                                                                                                                
+"HF_ENDPOINT": "https://hf-mirror.com"                                                                                                                                                                         
+}
+```
+/routing/splitter
+```
+"splitter": {
+  "active_strategy": "semantic_splitter", 
   "semantic_splitter": {
       "type": "local",
       "model_name": "moka-ai/m3e-small",
       "trust_remote_code": true
   }
+}
 ```
 推荐2(★★☆)
 ```
