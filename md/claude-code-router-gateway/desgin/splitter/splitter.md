@@ -61,3 +61,6 @@ src/ccrg/splitter
 ```    
 active_strategy 选择哪一种分流器.默认是keyword_splitter
 llm_splitter 配置那个providers用于llm_splitter
+
+## keyword_splitter vs semantic_splitter_local vs llm_splitter
+[splitter_vs.md](splitter_vs.md)
