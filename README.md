@@ -2,11 +2,20 @@
 
 极薄的 AI 请求网关，支持在同一 agent loop 内根据请求特征动态路由到不同 provider。
 
+![img.png](img.png)
+
 ## 解决的问题是：
 1.命中codeplan 套餐
 2.分流token 不同的模型做不同的事情
 
-## 起因：
+### 伪工作流
+CCRG 不用当「大脑」，只当「指挥 + 分流管道」
+扁平化命中机制。内部不做流程，而是摊开分流。
+去命中providers，但是claude code cli 能流式响应的效果。
+### 尽量让每个 provider 都能流式响应。
+claude code cli 一次请求，CCRG 也只发出一个请求（除了fallback 和失败重试的的等兜底）
+
+## 起因：rr
 minimax 2.7 太笨了，但是便宜
 ## 特性
 
@@ -94,7 +103,12 @@ src/ccrg/
 ## Claude Code Router Gateway (CCRG)
 [overview.md](md/claude-code-router-gateway/overview.md)
 http://127.0.0.1:3428/stats
-http://127.0.0.1:3428/dashboard 
+ 
+
+## 运行
+## 运行 on windows
+cd currpath
+./run.ccr.bat
 
 
 
@@ -106,6 +120,12 @@ http://127.0.0.1:3428/dashboard
 
   如果 3458 还有进程，用 taskkill /F /PID <PID> 杀掉即可。
 
+## 日志标签
+[logtag.md](md/code/logtag.md)
+
+## 接入方案
+[claude_code_cli.md](md/claude-code-router-gateway/api/claude_code_cli.md)
+[workbuddy.md](md/claude-code-router-gateway/api/workbuddy.md)
 
 ## License
 

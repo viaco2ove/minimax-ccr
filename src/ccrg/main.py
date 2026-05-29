@@ -2,6 +2,7 @@
 CCRG FastAPI 主入口。
 """
 
+import asyncio
 import json
 import logging
 import time
@@ -14,12 +15,18 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from .config import load_config
-from .protocol import AnthropicAdapter, OpenAIAdapter, ProtocolAdapter
+from .protocol import AnthropicAdapter, OpenAIAdapter, MiniMaxAdapter, ProtocolAdapter
+from .translator.openai_translator import convert_chunks_to_json
+from .translator.sse_client import _stream_wrapper, collect_request
 from .classifier.scenario import ScenarioClassifier
 from .classifier.tool_type import ToolTypeClassifier
 from .classifier.keyword import KeywordClassifier
 from .provider.registry import ProviderRegistry
 from .router import RoutingEngine
+from .router.fallback import FallbackRouter
+from .splitter.workflow import WorkflowSplitter
+from .splitter import Splitter, SplitterFactory
+from .splitter.base import RoutingDecision
 from .types import GatewayConfig, ProviderConfig, RequestTags
 from .usage_stats import get_usage_stats
 
@@ -50,6 +57,9 @@ _routing_engine: RoutingEngine | None = None
 _usage_stats = None
 _classifier_scenario = ScenarioClassifier()
 _classifier_tool = ToolTypeClassifier()
+_workflow_splitter: Splitter | None = None
+_provider_semaphores: dict[str, asyncio.Semaphore] = {}
+_provider_last_request_time: dict[str, float] = {}
 
 # ── Dashboard 页面 ──────────────────────────────────────────────
 
@@ -177,7 +187,7 @@ function renderRangeTable(data){
   const entries=Object.entries(data||{});
   if(!entries.length){el.innerHTML='<div class="empty">该时间段暂无数据</div>';return}
   let mx=0;entries.forEach(([_,d])=>{if(d.total_tokens>mx)mx=d.total_tokens});
-  let h='<table><tr><th>Provider</th><th>Models</th><th>请求数</th><th>成功/失败</th><th>输入</th><th>输出</th><th>总计 Tokens</th><th>平均延迟</th></tr>';
+  let h='<table><tr><th>Provider</th><th>Models</th><th>请求数</th><th>成功次数/总次数</th><th>输入</th><th>输出</th><th>总计 Tokens</th><th>平均延迟</th></tr>';
   entries.forEach(([name,d],i)=>{
     const c=COLORS[i%COLORS.length];
     h+=`<tr><td style="font-weight:600;color:${c}">${name}</td><td style="font-size:11px;color:#94a3b8">${(d.models||[]).join(', ')}</td><td>${fmt(d.request_count)}</td><td>${sTag(d.success_count,d.fail_count)}</td><td>${fmtT(d.input_tokens)}</td><td>${fmtT(d.output_tokens)}</td><td>${fmtT(d.total_tokens)}${barH(mx?d.total_tokens/mx*100:0,c)}</td><td>${fmtMs(d.avg_latency_ms)}</td></tr>`;
@@ -218,12 +228,39 @@ setInterval(loadStats,30000);
 
 def init_app(config_path: str | None = None) -> FastAPI:
     """初始化 FastAPI 应用"""
-    global _config, _registry, _routing_engine, _usage_stats, app
+    global _config, _registry, _routing_engine, _usage_stats, app, _workflow_splitter
 
     _config = load_config(config_path)
     _registry = ProviderRegistry(_config)
     _routing_engine = RoutingEngine(_config)
     _usage_stats = get_usage_stats(_config)
+
+    # 创建 splitter（根据配置选择 active_strategy）
+    splitter_cfg = _config.routing.get("splitter", {})
+    active_strategy = splitter_cfg.get("active_strategy", "keyword_splitter")
+    _workflow_splitter = SplitterFactory.create(
+        active_strategy=active_strategy,
+        config=_config.__dict__ if hasattr(_config, "__dict__") else {},
+        keywords=_config.keywords,
+        registry=_registry,
+        usage_stats=_usage_stats,
+    )
+
+    # 预加载 semantic_splitter 模型（避免第一次请求时才下载）
+    if active_strategy == "semantic_splitter":
+        logger.info("[SemanticSplitterLocal] 预加载模型中...")
+        _workflow_splitter._load_model()
+        logger.info("[SemanticSplitterLocal] 模型预加载完成")
+
+    # 初始化 per-provider 并发控制信号量
+    global _provider_semaphores
+    _provider_semaphores.clear()
+    _provider_last_request_time.clear()
+    for name, prov in _config.providers.items():
+        delay = prov.per_request_delay_ms
+        if delay and delay > 0:
+            _provider_semaphores[name] = asyncio.Semaphore(1)
+            logger.info(f"Rate limit semaphore for {name}: per_request_delay_ms={delay}")
 
     # 设置日志级别
     log_level_str = _config.server.get("log_level", "info").upper()
@@ -240,11 +277,51 @@ def init_app(config_path: str | None = None) -> FastAPI:
         for h in _root.handlers:
             h.setLevel(log_level)
 
+    # 确保 translator 子模块的 logger 也能输出 DEBUG
+    _translator_logger = logging.getLogger("ccrg.translator")
+    _translator_logger.setLevel(log_level)
+
     app = FastAPI(title="Claude Code Router Gateway")
 
     @app.post("/v1/messages")
     async def handle_messages(request: Request):
         return await _handle_request(request)
+
+    @app.post("/v1/chat/completions")
+    async def handle_chat_completions(request: Request):
+        """OpenAI Chat Completions 格式端点 - 转换为 Anthropic 格式后处理"""
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"type": "invalid_request", "message": "Invalid JSON"}}
+            )
+
+        logger.debug(f"[TRANSLATOR_OPENAI] INPUT: {json.dumps(body, ensure_ascii=False)[:500]}")
+
+        # OpenAI 格式 -> Anthropic 格式
+        transformed_body = _convert_openai_to_anthropic(body)
+        logger.debug(f"[TRANSLATOR_OPENAI] TRANSFORMED: {json.dumps(transformed_body, ensure_ascii=False)[:500]}")
+
+        logger.debug(f"[TRANSLATOR_OPENAI] stream=false, forcing stream=True for chunk collection")
+
+        if transformed_body.get("stream"):
+            # stream=true: 实时 yield SSE chunks
+            return StreamingResponse(
+                _stream_wrapper(_handle_request, transformed_body),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache"}
+            )
+        else:
+            # stream=false: 强制 stream=True 以收集 chunks，再转换为 JSON
+            transformed_body = dict(transformed_body)
+            transformed_body["stream"] = True
+            chunks, model = await collect_request(_handle_request, transformed_body)
+            resp_data = convert_chunks_to_json(chunks, model)
+            logger.debug(f"[TRANSLATOR_OPENAI] resp_data:{resp_data}")
+
+            return JSONResponse(content=resp_data)
 
     @app.get("/health")
     async def health():
@@ -386,6 +463,7 @@ async def _handle_request(request: Request) -> Response:
             prov_headers = {
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {prov_config.api_key}",
+                "anthropic-version": "2023-06-01",
             }
 
             # 获取 provider 对应的超时时间
@@ -407,7 +485,13 @@ async def _handle_request(request: Request) -> Response:
                     response.raise_for_status()
 
                     resp_data = response.json()
+                    # 检查空响应
+                    if not resp_data:
+                        raise ValueError(f"{prov_name} returned empty/null response")
+
                     transformed_resp = prov_adapter.transform_json_response(resp_data)
+                    if not transformed_resp:
+                        raise ValueError(f"{prov_name} transform returned empty/null response")
 
                     latency_ms = (time.time() - start_time) * 1000
 
@@ -433,14 +517,14 @@ async def _handle_request(request: Request) -> Response:
         except httpx.HTTPStatusError as e:
             error_body = ""
             try:
-                error_body = e.response.text[:500]
+                error_body = e.response.text[:1000]
             except Exception:
                 pass
-            logger.warning(f"[{request_id}] {prov_name} returned {e.response.status_code}: {error_body}")
+            logger.error(f"[{request_id}] {prov_name} returned {e.response.status_code}: {error_body}")
 
             # 400 且错误信息表明模型不支持某功能 → 剥离该功能并重试
             if e.response.status_code == 400 and prov_name not in retried_with_stripped:
-                stripped = _strip_unsupported_features(body, error_body)
+                stripped = _strip_unsupported_features(error_body, body)
                 if stripped is not body:
                     retried_with_stripped.add(prov_name)
                     logger.info(f"[{request_id}] {prov_name} doesn't support some features, stripping and retrying")
@@ -559,6 +643,7 @@ async def _handle_streaming_with_fallback(
             headers = {
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {prov_config.api_key}",
+                "anthropic-version": "2023-06-01",
             }
 
             logger.info(f"[{request_id}] Calling {prov_name} at {target_url} (timeout={prov_timeout:.0f}s)")
@@ -572,6 +657,10 @@ async def _handle_streaming_with_fallback(
                         if prov_config.protocol == "chat_openai":
                             converter = OpenAISSEConverter(model)
 
+                        # 用于 Anthropic SSE 事件解析 usage
+                        usage_input_tokens = 0
+                        usage_output_tokens = 0
+
                         first_chunk_sent = False
                         async for line in response.aiter_lines():
                             line = line.strip()
@@ -582,6 +671,25 @@ async def _handle_streaming_with_fallback(
                                 yield f"{line}\n".encode("utf-8")
                                 first_chunk_sent = True
                                 continue
+
+                            # 解析 Anthropic SSE 事件获取 usage
+                            if line.startswith("data: "):
+                                data_str = line[6:].strip()
+                                if data_str.startswith("{"):
+                                    try:
+                                        import json as _json
+                                        event_data = _json.loads(data_str)
+                                        event_type = event_data.get("type", "")
+                                        if event_type == "message_start":
+                                            msg = event_data.get("message", {})
+                                            usage = msg.get("usage", {})
+                                            if not usage_input_tokens:
+                                                usage_input_tokens = usage.get("input_tokens", 0)
+                                        elif event_type == "message_delta":
+                                            usage = event_data.get("usage", {})
+                                            usage_output_tokens = usage.get("output_tokens", 0)
+                                    except Exception:
+                                        pass
 
                             if converter:
                                 raw_chunk = line.encode("utf-8")
@@ -595,12 +703,21 @@ async def _handle_streaming_with_fallback(
 
                         # 流成功完成（正常结束或客户端断开）
                         if first_chunk_sent:
+                            # 从 converter 或 SSE 事件中提取 token 使用量
+                            if converter and hasattr(converter, "get_usage"):
+                                usage = converter.get_usage()
+                                input_tokens = usage.get("input_tokens", 0)
+                                output_tokens = usage.get("output_tokens", 0)
+                            else:
+                                input_tokens = usage_input_tokens
+                                output_tokens = usage_output_tokens
+
                             latency_ms = (time.time() - start_time) * 1000
                             logger.info(f"[{request_id}] Streaming completed from {prov_name}, latency={latency_ms/1000:.3f}s")
                             if usage_stats:
                                 usage_stats.record(
                                     provider=prov_name, model=model,
-                                    input_tokens=0, output_tokens=0,
+                                    input_tokens=input_tokens, output_tokens=output_tokens,
                                     latency_ms=latency_ms, success=True,
                                     route_rule=matched_rule,
                                 )
@@ -616,7 +733,7 @@ async def _handle_streaming_with_fallback(
 
                 # 400 且错误信息表明模型不支持某功能 → 剥离该功能并重试
                 if e.response.status_code == 400 and prov_name not in retried_with_stripped:
-                    stripped = _strip_unsupported_features(original_body, error_body)
+                    stripped = _strip_unsupported_features(error_body, original_body)
                     if stripped is not original_body:
                         retried_with_stripped.add(prov_name)
                         logger.info(f"[{request_id}] {prov_name} doesn't support some features, stripping and retrying")
@@ -638,8 +755,8 @@ async def _handle_streaming_with_fallback(
         latency = time.time() - start_time
         logger.error(f"[{request_id}] All streaming providers failed after {latency:.3f}s")
         error_msg = str(last_error) if last_error else "All providers failed"
-        error_json = json.dumps({"error": {"type": "upstream_error", "message": error_msg}})
-        yield f"data: {error_json}\n\n".encode("utf-8")
+        error_json = json.dumps({"type": "error", "error": {"type": "api_error", "message": error_msg}})
+        yield f"event: error\ndata: {error_json}\n\n".encode("utf-8")
 
         if usage_stats:
             usage_stats.record(
@@ -653,31 +770,81 @@ async def _handle_streaming_with_fallback(
     return StreamingResponse(stream_generator(), media_type="text/event-stream")
 
 
-def _strip_unsupported_features(body: dict, error_body: str) -> dict:
-    """根据 upstream 400 错误信息，剥离请求中不支持的功能
+def _strip_unsupported_features(error_msg: str, req_for_provider: dict) -> dict:
+    """根据 upstream 400 错误信息和当前请求，剥离可能导致 400 的功能
 
-    检测常见的不支持错误：
-    - image_url / image 不支持 -> 剥离图片内容块
-    - thinking 不支持 -> 剥离 thinking 字段
-    返回修改后的 body；如果不需要修改则返回原 body。
+    直接基于请求字段进行剥离，适用于 call_provider_streaming 的重试逻辑。
+    对于 codeplan_anthropic 协议，额外清理可能导致 400 的字段：
+    - thinking 字段可能导致 "thinking not supported" 错误
+    - output_config 可能导致 "output_config.effort" 相关错误
+    - tool_choice 的 any/tool 类型可能不被支持
     """
-    changed = False
-    result = body
+    result = dict(req_for_provider)
+
+    # 优先根据错误信息进行针对性剥离
+    error_lower = error_msg.lower()
 
     # 检测图片相关不支持错误
-    image_keywords = ["image_url", "image content", "vision", "not supported by certain models"]
-    if any(kw.lower() in error_body.lower() for kw in image_keywords):
+    image_keywords = ["image_url", "image content", "vision", "not supported by certain models", "image block"]
+    if any(kw in error_lower for kw in image_keywords):
         result = _strip_image_blocks(result)
-        if result is not body:
-            changed = True
 
     # 检测 thinking 相关不支持错误
-    thinking_keywords = ["thinking", "extended thinking", "thinking_mode"]
-    if any(kw.lower() in error_body.lower() for kw in thinking_keywords):
+    thinking_keywords = ["thinking", "extended thinking", "thinking_mode", "not support thinking"]
+    if any(kw in error_lower for kw in thinking_keywords):
         if "thinking" in result:
             result = dict(result)
             del result["thinking"]
-            changed = True
+
+    # 检测 output_config.effort 相关错误
+    effort_keywords = ["output_config.effort", "effort", "xhigh"]
+    if any(kw in error_lower for kw in effort_keywords):
+        if "output_config" in result:
+            result = dict(result)
+            if isinstance(result["output_config"], dict) and "effort" in result["output_config"]:
+                effort = result["output_config"]["effort"]
+                valid_efforts = {"low", "medium", "high", "max"}
+                if effort not in valid_efforts:
+                    result["output_config"] = dict(result["output_config"])
+                    if effort == "xhigh":
+                        result["output_config"]["effort"] = "high"
+                    else:
+                        result["output_config"]["effort"] = "medium"
+                else:
+                    del result["output_config"]
+            else:
+                del result["output_config"]
+
+    # 对于 codeplan_anthropic 协议，额外做预防性剥离
+    # 因为 400 错误可能是由 provider 不支持的 Claude Code 特有参数导致的
+    protocol = req_for_provider.get("protocol", "")
+    if protocol in ("codeplan_anthropic", "mmx"):
+        # 预防性剥离 thinking（MiniMax 等 provider 的 codeplan 接口可能不支持）
+        if "thinking" in result:
+            result = dict(result)
+            del result["thinking"]
+
+        # 清理 tool_choice
+        if "tool_choice" in result:
+            tc = result["tool_choice"]
+            if isinstance(tc, dict):
+                tc_type = tc.get("type", "")
+                if tc_type in ("any", "tool"):
+                    result = dict(result)
+                    result["tool_choice"] = {"type": "auto"}
+
+        # 确保 max_tokens 不超过 32K
+        if "max_tokens" in result:
+            try:
+                current_max = int(result["max_tokens"])
+                if current_max > 32000:
+                    result = dict(result)
+                    result["max_tokens"] = 32000
+            except (ValueError, TypeError):
+                pass
+
+    # 清理 messages 中的空 text blocks 和 thinking blocks（预防性剥离）
+    result = _strip_empty_and_unsupported_blocks(result)
 
     return result
 
@@ -709,6 +876,45 @@ def _strip_image_blocks(body: dict) -> dict:
     return body
 
 
+def _strip_empty_and_unsupported_blocks(body: dict) -> dict:
+    """清理消息中的空 text blocks 和 thinking blocks"""
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return body
+
+    changed = False
+    new_messages = []
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            new_content = []
+            for block in content:
+                if not isinstance(block, dict):
+                    new_content.append(block)
+                    continue
+                block_type = block.get("type", "")
+                # 跳过空 text block
+                if block_type == "text":
+                    text = block.get("text", "")
+                    if text and text.strip():
+                        new_content.append(block)
+                    else:
+                        changed = True
+                    continue
+                # 跳过 thinking block（MiniMax 等不支持）
+                if block_type == "thinking":
+                    changed = True
+                    continue
+                new_content.append(block)
+            if changed:
+                msg = dict(msg, content=new_content)
+        new_messages.append(msg)
+
+    if changed:
+        return dict(body, messages=new_messages)
+    return body
+
+
 def _provider_config_to_dict(provider: ProviderConfig) -> dict:
     """将 ProviderConfig 转换为 dict(供 adapter 使用)"""
     return {
@@ -716,6 +922,7 @@ def _provider_config_to_dict(provider: ProviderConfig) -> dict:
         "api_base_url": provider.api_base_url,
         "api_key": provider.api_key,
         "protocol": provider.protocol,
+        "providers_adapter": provider.providers_adapter,
         "models": provider.models,
         "capabilities": provider.capabilities,
         "cost_tier": provider.cost_tier,
@@ -726,11 +933,25 @@ def _provider_config_to_dict(provider: ProviderConfig) -> dict:
 
 
 def _get_adapter_for_provider(provider_name: str) -> ProtocolAdapter:
-    """获取 provider 对应的 adapter"""
+    """获取 provider 对应的 adapter
+
+    优先使用 provider config 中的 providers_adapter 字段，
+    其次根据 protocol 字段选择默认 adapter。
+    """
     provider = _registry.get(provider_name)
     if not provider:
         return AnthropicAdapter()
 
+    # 优先使用 providers_adapter 配置
+    adapter_name = provider.providers_adapter
+    if adapter_name == "minimax":
+        return MiniMaxAdapter()
+    elif adapter_name == "openai":
+        return OpenAIAdapter()
+    elif adapter_name == "anthropic":
+        return AnthropicAdapter()
+
+    # 回退到 protocol 字段
     if provider.protocol == "codeplan_anthropic":
         return AnthropicAdapter()
     elif provider.protocol == "chat_openai":
@@ -762,37 +983,18 @@ def _classify_request(request: dict) -> RequestTags:
     return tags
 
 
-def _detect_workflow_intent(body: dict, keywords: dict) -> str:
-    """基于 keywords.json 检测工作流意图：chat 或 task"""
-    workflow_keywords = keywords.get("workflow_intent", {})
-    chat_keywords = workflow_keywords.get("chat_intention", [])
-    task_keywords = workflow_keywords.get("intention_analyze", [])
-
-    # 收集用户消息文本
-    user_texts = []
-    for msg in body.get("messages", []):
-        role = msg.get("role", "")
-        if role != "user":
-            continue
-        content = msg.get("content", "")
-        if isinstance(content, str):
-            user_texts.append(content)
-        elif isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    user_texts.append(block.get("text", ""))
-
-    user_text = " ".join(user_texts).lower()
-
-    # 计算命中
-    chat_score = sum(1 for kw in chat_keywords if kw.lower() in user_text)
-    task_score = sum(1 for kw in task_keywords if kw.lower() in user_text)
-
-    logger.debug(f"Workflow intent detection: chat={chat_score}, task={task_score}")
-
-    if task_score > chat_score:
-        return "task"
-    return "chat"
+def _detect_workflow_intent(body: dict, keywords: dict) -> RoutingDecision:
+    """基于 splitter 检测工作流意图，返回完整路由决策"""
+    global _workflow_splitter
+    if _workflow_splitter is not None:
+        return _workflow_splitter.detect(body)
+    # Fallback: 旧逻辑（不应该走到这里）
+    from .splitter.workflow import WorkflowSplitter
+    splitter = WorkflowSplitter(keywords)
+    # 旧 WorkflowSplitter 返回 str，需要包装
+    intent = splitter.detect_intent(body)
+    default = "minimax:MiniMax-M2.7"
+    return RoutingDecision(intent=intent, route=default, matched_rule="workflow_splitter_fallback")
 
 
 def _resolve_execute_route(body: dict, request_id: str) -> str:
@@ -814,7 +1016,43 @@ def _resolve_execute_route(body: dict, request_id: str) -> str:
         return route_str
     except Exception as e:
         logger.warning(f"[{request_id}] execute_solve routing failed ({e}), using workflow default")
-        return _config.workflow.execute_solve
+        return _config.workflow.get_execute_solve_single()
+
+
+def _get_stage_routes(stage: str, body: dict = None) -> tuple[list[str], str]:
+    """根据 workflow 阶段获取路由列表和步骤名
+    
+    Args:
+        stage: workflow 阶段名称（intention_analyze/chat_intention/analyze_plan/execute_solve）
+        body: 原始请求体（用于 scenario 检测）
+    
+    Returns:
+        (route_list, step_name): 路由列表（包含 fallback）和步骤名
+    """
+    global _config
+    
+    # 优先检查 scenario：如果有图片，直接走 mmx
+    if body:
+        tags = _classify_request(body)
+        if tags.scenario == "image":
+            image_config = _config.routing.get("scenarios", {}).get("image", {})
+            route = image_config.get("route", "mmx:MiniMax-M2.7")
+            fallback = image_config.get("fallback", [])
+            logger.info(f"Image scenario detected, routing to {route}")
+            return [route] + fallback, "image"
+    
+    if stage == "intention_analyze":
+        return _config.workflow.get_intention_analyze_list(), "intention_analyze"
+    elif stage == "chat_intention":
+        return _config.workflow.get_chat_intention_list(), "chat_intention"
+    elif stage == "analyze_plan":
+        return _config.workflow.get_analyze_plan_list(), "analyze_plan"
+    elif stage == "execute_solve":
+        return _config.workflow.get_execute_solve_list(), "execute_solve"
+    else:
+        # 未知阶段，默认 execute_solve
+        logger.warning(f"Unknown workflow_stage: {stage}, defaulting to execute_solve")
+        return _config.workflow.get_execute_solve_list(), "execute_solve"
 
 
 def _is_user_initiated_message(body: dict) -> bool:
@@ -861,6 +1099,231 @@ def _is_user_initiated_message(body: dict) -> bool:
         return False
 
     return False
+
+
+def _wrap_non_streaming_response(resp: dict) -> bytes:
+    """将非流式 API 响应包装成 Anthropic SSE 流式事件序列。
+
+    Anthropic 流式 API 的事件序列：
+    1. message_start (包含 id, type, role, model, content=[], usage)
+    2. content_block_start (index, type="text", text=[])
+    3. content_block_delta (index, type="text_delta", text=...)
+    4. content_block_stop (index)
+    5. message_delta (stop_reason, usage)
+    6. message_stop
+    """
+    chunks = []
+
+    msg_id = resp.get("id", f"msg_{uuid.uuid4().hex[:24]}")
+    model = resp.get("model", "unknown")
+    role = resp.get("role", "assistant")
+    stop_reason = resp.get("stop_reason", "end_turn")
+    usage = resp.get("usage", {"input_tokens": 0, "output_tokens": 0})
+
+    # 1. message_start
+    chunks.append(f"event: message_start\ndata: {json.dumps({'type': 'message_start', 'message': {'id': msg_id, 'type': 'message', 'role': role, 'model': model, 'content': [], 'stop_reason': None, 'usage': usage}}, ensure_ascii=False)}\n\n")
+
+    # 2-4. content blocks
+    content_blocks = resp.get("content", [])
+    for idx, block in enumerate(content_blocks):
+        if isinstance(block, dict):
+            block_type = block.get("type", "text")
+            if block_type == "text":
+                text = block.get("text", "")
+                # content_block_start
+                chunks.append(f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': idx, 'content_block': {'type': 'text', 'text': ''}}, ensure_ascii=False)}\n\n")
+                # content_block_delta
+                chunks.append(f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': idx, 'delta': {'type': 'text_delta', 'text': text}}, ensure_ascii=False)}\n\n")
+                # content_block_stop
+                chunks.append(f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': idx}, ensure_ascii=False)}\n\n")
+            elif block_type == "tool_use":
+                tool_id = block.get("id", f"toolu_{uuid.uuid4().hex[:24]}")
+                tool_name = block.get("name", "unknown")
+                tool_input = block.get("input", {})
+                # content_block_start
+                chunks.append(f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': idx, 'content_block': {'type': 'tool_use', 'id': tool_id, 'name': tool_name, 'input': {}}}, ensure_ascii=False)}\n\n")
+                # content_block_delta
+                input_json = json.dumps(tool_input, ensure_ascii=False)
+                chunks.append(f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': idx, 'delta': {'type': 'input_json_delta', 'partial_json': input_json}}, ensure_ascii=False)}\n\n")
+                # content_block_stop
+                chunks.append(f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': idx}, ensure_ascii=False)}\n\n")
+            elif block_type == "thinking":
+                thinking_text = block.get("thinking", "")
+                # content_block_start
+                chunks.append(f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': idx, 'content_block': {'type': 'thinking', 'thinking': ''}}, ensure_ascii=False)}\n\n")
+                # content_block_delta
+                chunks.append(f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': idx, 'delta': {'type': 'thinking_delta', 'thinking': thinking_text}}, ensure_ascii=False)}\n\n")
+                # content_block_stop
+                chunks.append(f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': idx}, ensure_ascii=False)}\n\n")
+
+    # 5. message_delta
+    output_tokens = usage.get("output_tokens", 0) if isinstance(usage, dict) else 0
+    chunks.append(f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': stop_reason}, 'usage': {'output_tokens': output_tokens}}, ensure_ascii=False)}\n\n")
+
+    # 6. message_stop
+    chunks.append(f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'}, ensure_ascii=False)}\n\n")
+
+    return "".join(chunks).encode("utf-8")
+
+
+def _make_streaming_error_sse(error_dict: dict) -> bytes:
+    """在流式 generator 中生成一个错误 SSE chunk。
+
+    不能在 streaming generator 里 raise HTTPException（HTTP 200 header 已发送），
+    只能 yield 一个包含 error 信息的 SSE chunk，让客户端解析错误。
+
+    Anthropic SDK 要求：
+    1. 必须有 `event: error` SSE 行
+    2. data 的 JSON 必须有顶层 `"type": "error"`
+    3. error 对象格式：`{"type": "<error_type>", "message": "..."}`
+    """
+    # 从 error_dict 提取 error 信息
+    err = error_dict.get("error", {})
+    if isinstance(err, dict):
+        err_type = err.get("type", "api_error")
+        err_msg = err.get("message", str(err))
+    else:
+        err_type = "api_error"
+        err_msg = str(err)
+
+    # 映射内部 error type 到 Anthropic 标准 error type
+    type_mapping = {
+        "context_length_exceeded": "invalid_request_error",
+        "rate_limit_exceeded": "rate_limit_error",
+        "workflow_error": "api_error",
+        "provider_error": "api_error",
+        "upstream_error": "api_error",
+        "invalid_request_error": "invalid_request_error",
+    }
+    anthropic_err_type = type_mapping.get(err_type, "api_error")
+
+    sse_event = "event: error\n"
+    sse_data = f"data: {json.dumps({'type': 'error', 'error': {'type': anthropic_err_type, 'message': err_msg}}, ensure_ascii=False)}\n\n"
+    return (sse_event + sse_data).encode("utf-8")
+
+
+def _is_compact_request(body: dict) -> bool:
+    """判断请求是否是 /compact 命令（Claude Code 的上下文压缩请求）。
+
+    /compact 请求应该直接透传给模型，不走 analyze_plan/execute_solve 流程。
+    """
+    messages = body.get("messages", [])
+    for msg in reversed(messages):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            if "/compact" in content:
+                return True
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    if "/compact" in block.get("text", ""):
+                        return True
+        break  # 只检查最后一条 user 消息
+    return False
+
+
+def _estimate_messages_tokens(messages: list) -> int:
+    """估算 messages 的 token 数（简化实现：字符数 / 4）"""
+    total_chars = len(json.dumps(messages, ensure_ascii=False))
+    return total_chars // 4
+
+
+def _truncate_message_content(msg: dict, max_chars: int) -> dict:
+    """截断单条消息内部的内容块，保留最后 max_chars 字符的内容。
+
+    用于处理单条消息包含大量 content blocks 的情况（如 /compact 请求
+    把所有历史对话塞进一条 user 消息的多个 text blocks 中）。
+    """
+    content = msg.get("content", "")
+
+    # 字符串内容：直接截断
+    if isinstance(content, str):
+        if len(content) <= max_chars:
+            return msg
+        return {**msg, "content": content[:max_chars] + "\n\n[... earlier content truncated ...]"}
+
+    # 列表内容：从后往前保留 blocks
+    if isinstance(content, list):
+        kept_chars = 0
+        kept_blocks = []
+        for block in reversed(content):
+            block_str = json.dumps(block, ensure_ascii=False)
+            block_chars = len(block_str)
+            if kept_chars + block_chars > max_chars and kept_blocks:
+                break
+            kept_blocks.append(block)
+            kept_chars += block_chars
+
+        kept_blocks.reverse()
+
+        if len(kept_blocks) == len(content):
+            return msg
+
+        # 在截断点插入提示 block（插入到 kept_blocks 开头，而非 msg 开头）
+        truncation_block = {
+            "type": "text",
+            "text": "<system-reminder> Earlier conversation history has been truncated to fit context window. The most recent messages are preserved. </system-reminder>"
+        }
+        return {**msg, "content": kept_blocks + [truncation_block]}
+
+    return msg
+
+
+def _truncate_messages(messages: list, max_context: int) -> list:
+    """兜底截断：保留 system + 最后 N 轮对话，砍掉最早的 messages。
+
+    策略：
+    1. 保留所有 system 消息
+    2. 保留最后 N 轮对话（估算 token 不超过 max_context 的 70%）
+    3. 如果单条消息超限，截断该消息内部的内容块
+    4. 在截断点插入一条提示消息说明上下文已被压缩
+    """
+    char_threshold = int(max_context * 0.7 * 4)  # token → 字符（1 token ≈ 4 chars）
+
+    # 分离 system 消息和对话消息
+    system_msgs = []
+    convo_msgs = []
+    for msg in messages:
+        if msg.get("role") == "system":
+            system_msgs.append(msg)
+        else:
+            convo_msgs.append(msg)
+
+    # 从后往前累加，直到超过阈值
+    kept_chars = 0
+    kept_msgs = []
+    for msg in reversed(convo_msgs):
+        msg_chars = len(json.dumps(msg, ensure_ascii=False))
+        if kept_chars + msg_chars > char_threshold and kept_msgs:
+            break
+        # 单条消息本身就超限 → 截断消息内部内容
+        if msg_chars > char_threshold:
+            msg = _truncate_message_content(msg, char_threshold - kept_chars)
+        kept_msgs.append(msg)
+        kept_chars += len(json.dumps(msg, ensure_ascii=False))
+
+    kept_msgs.reverse()
+
+    # 如果没有截断（全部保留），直接返回原始
+    if len(kept_msgs) == len(convo_msgs) and all(
+        len(json.dumps(k, ensure_ascii=False)) == len(json.dumps(o, ensure_ascii=False))
+        for k, o in zip(kept_msgs, convo_msgs)
+    ):
+        return messages
+
+    # 在截断点插入提示（如果 kept_msgs 第一条不是截断提示的话）
+    truncation_notice = {
+        "role": "user",
+        "content": "<system-reminder> Earlier conversation history has been truncated to fit context window. The most recent messages are preserved. </system-reminder>"
+    }
+
+    result = system_msgs + [truncation_notice] + kept_msgs
+    orig_tokens = _estimate_messages_tokens(messages)
+    result_tokens = _estimate_messages_tokens(result)
+    logger.info(f"Truncated messages: {len(messages)} → {len(result)}, tokens ~{orig_tokens} → ~{result_tokens}")
+    return result
 
 
 async def _handle_workflow(request: Request, body: dict, request_id: str) -> Response:
@@ -918,6 +1381,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
         prov_headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {prov_config.api_key}",
+            "anthropic-version": "2023-06-01",
         }
 
         prov_timeout = (prov_config.timeout_ms or _config.server.get("timeout_ms", 600000)) / 1000
@@ -930,11 +1394,40 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
         logger.debug(f"[{request_id}] → [{prov_name}] req: model={model}, stream=False, first_user={preview}")
         logger.info(f"[{request_id}] Workflow {step_name}: calling {prov_name} at {prov_target_url}")
 
+        # Rate limit control: delay before request if per_request_delay_ms is configured
+        delay = prov_config.per_request_delay_ms
+        if delay and delay > 0:
+            last_time = _provider_last_request_time.get(prov_name, 0)
+            elapsed = time.time() - last_time
+            if elapsed < delay / 1000:
+                sleep_time = (delay / 1000) - elapsed
+                logger.debug(f"[{request_id}] Rate limiting {prov_name}: sleeping {sleep_time:.3f}s (elapsed={elapsed:.3f}s, delay={delay}ms)")
+                await asyncio.sleep(sleep_time)
+            _provider_last_request_time[prov_name] = time.time()
+
         try:
             async with httpx.AsyncClient(timeout=prov_timeout) as client:
                 response = await client.post(prov_target_url, json=req_for_provider, headers=prov_headers)
                 response.raise_for_status()
                 resp_data = response.json()
+
+                # 检测空响应：HTTP 200 但 content 为空或缺少
+                if isinstance(resp_data, dict):
+                    content = resp_data.get("content", [])
+                    if not content or (isinstance(content, list) and all(
+                        not b.get("text", "").strip() for b in content
+                        if isinstance(b, dict) and b.get("type") == "text"
+                    )):
+                        # 空内容 → 视为失败，让 fallback 重试
+                        logger.warning(f"[{request_id}] {prov_name} returned 200 but empty content, treating as failed")
+                        if _usage_stats:
+                            _usage_stats.record(
+                                provider=prov_name, model=model,
+                                input_tokens=0, output_tokens=0,
+                                latency_ms=(time.time() - start_time) * 1000,
+                                success=False, route_rule=f"workflow.{step_name}",
+                            )
+                        return {"error": {"type": "empty_response", "message": f"{prov_name} returned empty content"}}, False
 
                 # 记录 usage
                 if _usage_stats and isinstance(resp_data, dict):
@@ -956,6 +1449,32 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 logger.debug(f"[{request_id}] ← [{prov_name}] completed, step={step_name}")
                 return resp_data, False
         except HTTPStatusError as e:
+            # 记录详细的错误响应信息
+            try:
+                error_text = e.response.text
+                logger.error(f"[{request_id}] {prov_name} returned {e.response.status_code} error: {error_text[:500]}")
+            except Exception as log_err:
+                logger.error(f"[{request_id}] Could not read error response: {log_err}")
+
+            # 400 时记录发送的请求体关键字段，帮助诊断 "invalid params"
+            if e.response.status_code == 400:
+                debug_keys = ["model", "max_tokens", "thinking", "tool_choice", "output_config",
+                              "stop_sequences", "temperature", "top_p", "top_k"]
+                debug_info = {k: req_for_provider.get(k) for k in debug_keys if k in req_for_provider}
+                # tools 只记录数量和名称
+                if "tools" in req_for_provider:
+                    tools = req_for_provider["tools"]
+                    debug_info["tools_count"] = len(tools)
+                    debug_info["tool_names"] = [t.get("name","?") for t in tools if isinstance(t, dict)]
+                # system 格式
+                system = req_for_provider.get("system")
+                if system is not None:
+                    if isinstance(system, list):
+                        debug_info["system_format"] = f"list[{len(system)}]"
+                    else:
+                        debug_info["system_format"] = f"str[{len(str(system))}]"
+                logger.warning(f"[{request_id}] {prov_name} 400 request debug: {json.dumps(debug_info, ensure_ascii=False, default=str)}")
+
             # 检查是否是 context length 超限错误 (400)
             if e.response.status_code == 400:
                 try:
@@ -1018,21 +1537,27 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 )
             return {"error": {"type": "workflow_error", "message": str(e)}}, False
 
+    # 本次调用的上下文（用于重试逻辑）
+    local_req_body = [dict(body)]  # 用列表包装以便在闭包中修改
+    retried_strip = False  # 本次调用是否已尝试过剥离
+
     async def call_provider_streaming(route_str: str, messages: list, step_name: str) -> AsyncGenerator[bytes, None]:
         """流式调用 provider，实时 yield 每个 chunk"""
+        nonlocal local_req_body, retried_strip
         prov_name, model = parse_provider_model(route_str)
         prov_config = _registry.get(prov_name)
         if not prov_config:
-            yield f"data: {json.dumps({'error': {'type': 'provider_error', 'message': f'Unknown provider: {prov_name}'}}, ensure_ascii=False)}\n\n".encode("utf-8")
+            yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'type': 'api_error', 'message': f'Unknown provider: {prov_name}'}}, ensure_ascii=False)}\n\n".encode("utf-8")
             return
 
         prov_adapter = _get_adapter_for_provider(prov_name)
 
-        # 构建请求
-        req_body = dict(body)
+        # 构建请求（使用可能已更新的 local_req_body）
+        req_body = local_req_body[0]
+        req_body = dict(req_body)
         req_body["messages"] = messages
         req_body["model"] = model
-        req_body["stream"] = True
+        req_body["stream"] = is_streaming
 
         req_for_provider = prov_adapter.transform_request(req_body, _provider_config_to_dict(prov_config))
         req_for_provider["model"] = model
@@ -1044,6 +1569,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
         prov_headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {prov_config.api_key}",
+            "anthropic-version": "2023-06-01",
         }
 
         prov_timeout = (prov_config.timeout_ms or _config.server.get("timeout_ms", 600000)) / 1000
@@ -1053,20 +1579,64 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
         if isinstance(first_user, list):
             first_user = next((c["text"] for c in first_user if c.get("type") == "text"), None)
         preview = str(first_user)[:250].replace("\n", " ") if first_user else "(no user msg)"
-        logger.debug(f"[{request_id}] → [{prov_name}] req: model={model}, stream=True, first_user={preview}")
+
+        # Debug: 打印更多请求信息
+        if logger.isEnabledFor(logging.DEBUG):
+            req_body_len = len(json.dumps(req_for_provider, ensure_ascii=False))
+            msgs_len = len(json.dumps(messages, ensure_ascii=False))
+            msgs_tokens = msgs_len // 4
+            logger.debug(f"[{request_id}] → [{prov_name}] req: model={model}, stream=True, req_len={req_body_len}, msgs_len={msgs_len}, msgs_tokens~{msgs_tokens}, first_user={preview}")
+        else:
+            logger.debug(f"[{request_id}] → [{prov_name}] req: model={model}, stream=True, first_user={preview}")
 
         logger.info(f"[{request_id}] Workflow {step_name} streaming: {prov_name} at {prov_target_url}")
+
+        # Rate limit control: delay before request if per_request_delay_ms is configured
+        delay = prov_config.per_request_delay_ms
+        if delay and delay > 0:
+            last_time = _provider_last_request_time.get(prov_name, 0)
+            elapsed = time.time() - last_time
+            if elapsed < delay / 1000:
+                sleep_time = (delay / 1000) - elapsed
+                logger.debug(f"[{request_id}] Rate limiting {prov_name}: sleeping {sleep_time:.3f}s (elapsed={elapsed:.3f}s, delay={delay}ms)")
+                await asyncio.sleep(sleep_time)
+            _provider_last_request_time[prov_name] = time.time()
+
+        # Debug: 保存完整请求体到文件，curl 用 @file 引用（避免 truncate）
+        if logger.isEnabledFor(logging.DEBUG):
+            req_dir = Path("logs/req")
+            req_dir.mkdir(parents=True, exist_ok=True)
+            req_file = req_dir / f"{request_id}_{prov_name}.json"
+            with open(req_file, "w", encoding="utf-8") as f:
+                json.dump(req_for_provider, f, ensure_ascii=False)
+            curl_cmd = (
+                f"curl -X POST '{prov_target_url}' \\\n"
+                f"  -H 'Content-Type: application/json' \\\n"
+                f"  -H 'Authorization: Bearer ***' \\\n"
+                f"  -H 'anthropic-version: 2023-06-01' \\\n"
+                f"  -d @logs/req/{req_file.name}"
+            )
+            logger.debug(f"[FallbackRouter] [REQ] [CURL] [{prov_name}]: {req_file} (chars={len(json.dumps(req_for_provider, ensure_ascii=False))})\n{curl_cmd}")
 
         try:
             async with httpx.AsyncClient(timeout=prov_timeout) as client:
                 async with client.stream("POST", prov_target_url, json=req_for_provider, headers=prov_headers) as response:
                     response.raise_for_status()
 
+                    # Debug: 追踪响应内容用于日志
+                    resp_first_chunk = None
+                    resp_last_chunk = None
+                    resp_chunk_count = 0
+                    resp_raw_lines = []  # 保存前几条原始行用于调试
+
                     # 根据 provider 类型选择 converter
                     converter = None
                     if prov_config.protocol == "chat_openai":
                         from .protocol.openai_sse import OpenAISSEConverter
                         converter = OpenAISSEConverter(model)
+                    elif prov_config.protocol in ("codeplan_anthropic", "mmx", "anthropic"):
+                        from .protocol.anthropic_sse import AnthropicSSEConverter
+                        converter = AnthropicSSEConverter(model)
 
                     async for line in response.aiter_lines():
                         line = line.strip()
@@ -1076,40 +1646,120 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                         # 如果是 SSE 格式 data: 开头
                         if line.startswith("data: "):
                             data_content = line[6:]  # 去掉 "data: " 前缀
-                            if data_content == "[DONE]":
-                                break
 
-                            # 如果有 converter，转换格式
+                            # 如果有 converter，转换格式（converter 会处理 [DONE]）
                             if converter:
                                 raw_chunk = line.encode("utf-8")
                                 events = converter.convert_chunk(raw_chunk)
                                 for event in events:
+                                    # Debug: 追踪响应内容
+                                    if resp_first_chunk is None:
+                                        resp_first_chunk = data_content[:200]
+                                    resp_last_chunk = data_content[:200]
+                                    resp_chunk_count += 1
                                     yield event
+                                if data_content == "[DONE]":
+                                    break
                             else:
+                                # Debug: 追踪响应内容
+                                if resp_first_chunk is None:
+                                    resp_first_chunk = data_content[:200]
+                                resp_last_chunk = data_content[:200]
+                                resp_chunk_count += 1
                                 # 直接 yield 原始数据
+                                if data_content == "[DONE]":
+                                    break
                                 yield f"{line}\n".encode("utf-8")
-                        else:
-                            # 非 SSE 格式，直接 yield
+                        elif line.startswith("event: ") and converter:
+                            # 有 converter 时，event: 行由 converter 内部处理，跳过
+                            converter.convert_chunk(line.encode("utf-8"))
+                        elif not converter:
+                            # 没有 converter 时，直接 yield 原始行
                             yield f"{line}\n".encode("utf-8")
+
+            # 从 converter 中提取 token 使用量
+            if converter and hasattr(converter, "get_usage"):
+                usage = converter.get_usage()
+                input_tokens = usage.get("input_tokens", 0)
+                output_tokens = usage.get("output_tokens", 0)
+            else:
+                input_tokens = 0
+                output_tokens = 0
 
             # 记录成功
             if _usage_stats:
                 _usage_stats.record(
                     provider=prov_name, model=model,
-                    input_tokens=0, output_tokens=0,
+                    input_tokens=input_tokens, output_tokens=output_tokens,
                     latency_ms=(time.time() - start_time) * 1000,
                     success=True, route_rule=f"workflow.{step_name}",
                 )
             logger.debug(f"[{request_id}] ← [{prov_name}] stream completed, step={step_name}")
+            logger.debug(f"[FallbackRouter] [RESULT] [REPONSE] [{prov_name}] step={step_name}, status=200 OK, chunks={resp_chunk_count}, first={resp_first_chunk or 'none'}, last={resp_last_chunk or 'none'}, input_tokens={input_tokens}, output_tokens={output_tokens}")
 
         except HTTPStatusError as e:
+            # 记录详细的错误响应信息
+            error_text = ""
+            try:
+                # 流式响应不能直接 .text，需要先 aread
+                await e.response.aread()
+                error_text = e.response.text
+                logger.error(f"[{request_id}] {prov_name} streaming returned {e.response.status_code} error: {error_text[:500]}")
+            except Exception as log_err:
+                # aread 失败，尝试从异常消息中提取 error body
+                error_text = str(e)
+                # 尝试提取 body 部分（格式: "...body b'...'")
+                import re
+                body_match = re.search(r"body b'(.*?)'", error_text)
+                if body_match:
+                    import base64
+                    try:
+                        error_text = body_match.group(1).encode().decode("unicode_escape")
+                    except Exception:
+                        pass
+                logger.error(f"[{request_id}] {prov_name} streaming {e.response.status_code}, err from exception: {error_text[:500]}")
+
+            # 400 时记录发送的请求体关键字段，帮助诊断 "invalid params"
+            if e.response.status_code == 400:
+                debug_keys = ["model", "max_tokens", "thinking", "tool_choice", "output_config",
+                              "stop_sequences", "temperature", "top_p", "top_k"]
+                debug_info = {k: req_for_provider.get(k) for k in debug_keys if k in req_for_provider}
+                if "tools" in req_for_provider:
+                    tools = req_for_provider["tools"]
+                    debug_info["tools_count"] = len(tools)
+                    debug_info["tool_names"] = [t.get("name","?") for t in tools if isinstance(t, dict)]
+                system = req_for_provider.get("system")
+                if system is not None:
+                    if isinstance(system, list):
+                        debug_info["system_format"] = f"list[{len(system)}]"
+                    else:
+                        debug_info["system_format"] = f"str[{len(str(system))}]"
+
+                # Debug: 打印完整的 curl 命令
+                if logger.isEnabledFor(logging.DEBUG):
+                    req_dir = Path("logs/req")
+                    req_dir.mkdir(parents=True, exist_ok=True)
+                    req_file = req_dir / f"{request_id}_{prov_name}_400.json"
+                    with open(req_file, "w", encoding="utf-8") as f:
+                        json.dump(req_for_provider, f, ensure_ascii=False)
+                    curl_cmd = (
+                        f"curl -X POST '{prov_target_url}' \\\n"
+                        f"  -H 'Content-Type: application/json' \\\n"
+                        f"  -H 'Authorization: Bearer ***' \\\n"
+                        f"  -H 'anthropic-version: 2023-06-01' \\\n"
+                        f"  -d @logs/req/{req_file.name}"
+                    )
+                    logger.debug(f"[FallbackRouter] [REQ] [CURL] [{prov_name}]: {req_file} (chars={len(json.dumps(req_for_provider, ensure_ascii=False))})\n{curl_cmd}")
+
+                logger.warning(f"[{request_id}] {prov_name} streaming 400 request debug: {json.dumps(debug_info, ensure_ascii=False, default=str)}")
+
             # 检查是否是 context length 超限错误
             if e.response.status_code == 400:
                 try:
                     err_body = e.response.json()
                     err_msg = err_body.get("error", {}).get("message", "") or str(err_body)
                 except Exception:
-                    err_msg = str(e)
+                    err_msg = error_text or str(e)
 
                 token_limit_keywords = [
                     "context length", "token limit", "max tokens",
@@ -1131,12 +1781,40 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                             latency_ms=(time.time() - start_time) * 1000,
                             success=False, route_rule=f"workflow.{step_name}",
                         )
-                    yield f"data: {json.dumps({'error': {'type': 'context_length_exceeded', 'message': user_msg}}, ensure_ascii=False)}\n\n".encode("utf-8")
+                    yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'type': 'invalid_request_error', 'message': user_msg}}, ensure_ascii=False)}\n\n".encode("utf-8")
                     return
 
-            # 429 Too Many Requests
-            if e.response.status_code == 429:
-                logger.warning(f"[{request_id}] Workflow {step_name} hit rate limit (429)")
+                # 非 context 超限的 400 错误（如 invalid params）
+                # 抛出异常让 FallbackRouter 重试
+                if not retried_strip:
+                    stripped = _strip_unsupported_features(err_msg, req_for_provider)
+                    if stripped is not req_for_provider:
+                        retried_strip = True
+                        logger.info(f"[{request_id}] {prov_name} doesn't support some features, stripping and retrying")
+                        # Debug: 保存剥离后的请求体到文件
+                        if logger.isEnabledFor(logging.DEBUG):
+                            req_dir = Path("logs/req")
+                            req_dir.mkdir(parents=True, exist_ok=True)
+                            req_file = req_dir / f"{request_id}_{prov_name}_strip.json"
+                            with open(req_file, "w", encoding="utf-8") as f:
+                                json.dump(stripped, f, ensure_ascii=False)
+                            curl_cmd = (
+                                f"curl -X POST '{prov_target_url}' \\\n"
+                                f"  -H 'Content-Type: application/json' \\\n"
+                                f"  -H 'Authorization: Bearer ***' \\\n"
+                                f"  -H 'anthropic-version: 2023-06-01' \\\n"
+                                f"  -d @logs/req/{req_file.name}"
+                            )
+                            logger.debug(f"[FallbackRouter] [REQ] [CURL] [{prov_name}]: {req_file} (chars={len(json.dumps(stripped, ensure_ascii=False))})\n{curl_cmd}")
+                        # 更新 local_req_body 用于下次重试
+                        local_req_body[0] = stripped
+                        # 抛出异常让 FallbackRouter 重试
+                        raise Exception(f"{prov_name} stripped unsupported features, will retry")
+
+                # 打印完整响应体供调试（error_text 在上面 aread() 时已读取）
+                err_body_str = error_text if error_text else str(e)
+                logger.warning(f"[{request_id}] {prov_name} streaming 400 response body: {err_body_str[:500]}")
+                logger.warning(f"[{request_id}] {prov_name} streaming 400 (not context error): {(error_text[:200] if error_text else str(e)[:200])}")
                 if _usage_stats:
                     _usage_stats.record(
                         provider=prov_name, model=model,
@@ -1144,11 +1822,24 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                         latency_ms=(time.time() - start_time) * 1000,
                         success=False, route_rule=f"workflow.{step_name}",
                     )
-                yield f"data: {json.dumps({'error': {'type': 'rate_limit_exceeded', 'message': 'Rate limit exceeded, please try again later'}}, ensure_ascii=False)}\n\n".encode("utf-8")
-                return
+                raise RuntimeError(f"{prov_name} streaming returned 400: {err_msg[:300]}") from e
 
-            logger.warning(f"[{request_id}] Workflow {step_name} streaming failed: {e}")
-            yield f"data: {json.dumps({'error': {'type': 'workflow_error', 'message': str(e)}}, ensure_ascii=False)}\n\n".encode("utf-8")
+            # 429 Too Many Requests → 抛异常让调用方 fallback 到其他 provider
+            if e.response.status_code == 429:
+                logger.warning(f"[{request_id}] Workflow {step_name} hit rate limit (429) from {prov_name}")
+                logger.debug(f"[FallbackRouter] [RESULT] [REPONSE] [{prov_name}] status=429")
+                if _usage_stats:
+                    _usage_stats.record(
+                        provider=prov_name, model=model,
+                        input_tokens=0, output_tokens=0,
+                        latency_ms=(time.time() - start_time) * 1000,
+                        success=False, route_rule=f"workflow.{step_name}",
+                    )
+                raise RuntimeError(f"{prov_name} streaming returned 429 rate limit") from e
+
+            # 其他 HTTP 错误 → 也抛异常让调用方 fallback
+            logger.warning(f"[{request_id}] {prov_name} streaming returned {e.response.status_code}: {error_text[:200]}")
+            logger.debug(f"[FallbackRouter] [RESULT] [REPONSE] [{prov_name}] status={e.response.status_code}, error={error_text[:200] if error_text else str(e)}")
             if _usage_stats:
                 _usage_stats.record(
                     provider=prov_name, model=model,
@@ -1156,10 +1847,11 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                     latency_ms=(time.time() - start_time) * 1000,
                     success=False, route_rule=f"workflow.{step_name}",
                 )
+            raise RuntimeError(f"{prov_name} streaming returned {e.response.status_code}: {error_text[:300]}") from e
 
         except Exception as e:
-            logger.warning(f"[{request_id}] Workflow {step_name} streaming failed: {e}")
-            yield f"data: {json.dumps({'error': {'type': 'workflow_error', 'message': str(e)}}, ensure_ascii=False)}\n\n".encode("utf-8")
+            # 非HTTPStatusError 的其他异常 → 也抛出，让调用方 fallback
+            logger.warning(f"[{request_id}] {prov_name} streaming failed: {e}")
             if _usage_stats:
                 _usage_stats.record(
                     provider=prov_name, model=model,
@@ -1167,192 +1859,232 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                     latency_ms=(time.time() - start_time) * 1000,
                     success=False, route_rule=f"workflow.{step_name}",
                 )
+            raise
 
-    # Step 1: Intention Analysis (基于 keywords.json)
-    intent = _detect_workflow_intent(body, _config.keywords)
+    # Step 1: Intention Analysis (基于 splitter) - 返回 RoutingDecision
+    routing_decision = _detect_workflow_intent(body, _config.keywords)
+    intent = routing_decision.intent
+    stage_route = routing_decision.route  # splitter 返回的路由
     is_chat = (intent == "chat")
     is_user_initiated = _is_user_initiated_message(body)
-    logger.info(f"[{request_id}] Workflow intention (keyword-based): {intent}, user_initiated={is_user_initiated}")
+    logger.info(f"[{request_id}] Workflow routing decision: intent={intent}, route={stage_route}, "
+                f"matched_rule={routing_decision.matched_rule}, user_initiated={is_user_initiated}")
 
-    if is_streaming:
-        # 流式处理：每个步骤的结果实时 yield
-        async def workflow_stream_generator() -> AsyncGenerator[bytes, None]:
+    # Step 2: CLI 驱动的分步流式交互 - CCR 只做分流+流式透传
+    async def workflow_stream_generator() -> AsyncGenerator[bytes, None]:
+        # 1. 从 metadata 中获取 workflow_stage
+        metadata = body.get("metadata", {})
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except:
+                metadata = {}
+        
+        stage = metadata.get("workflow_stage")
+        logger.debug(f"metadata workflow_stage {metadata}")
+
+        # 2. 如果没有标注，自动判断（向后兼容）
+        if not stage:
+            routing_decision = _detect_workflow_intent(body, _config.keywords)
+            intent = routing_decision.intent
+            is_chat = (intent == "chat")
+            is_user_initiated = _is_user_initiated_message(body)
+            
             if is_chat:
-                # 闲聊：直接流式调用 chat_intention
-                async for chunk in call_provider_streaming(
-                    workflow_config.chat_intention,
-                    body.get("messages", []),
-                    "chat_intention"
-                ):
-                    yield chunk
+                stage = "chat_intention"
+            elif is_user_initiated:
+                stage = "intention_analyze"  # 首次用户输入 → 意图分析
             else:
-                # 任务
-                msgs = body.get("messages", [])
-                last_user_msg = None
-                for msg in reversed(msgs):
-                    if msg.get("role") == "user":
-                        last_user_msg = msg
-                        break
-                last_user_text = ""
-                if last_user_msg:
-                    c = last_user_msg.get("content", "")
-                    if isinstance(c, str):
-                        last_user_text = c
-                    elif isinstance(c, list):
-                        last_user_text = next((b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text"), "")
-                preview = str(last_user_text)[:300].replace("\n", " ") if last_user_text else "(no user msg)"
-
-                if is_user_initiated:
-                    # 用户主动输入的 task → 先 analyze_plan (qianfan)，再 execute_solve (minimax)
-                    logger.info(f"[{request_id}] Task (user-initiated) → analyze_plan then execute_solve. Last user msg: {preview}")
-
-                    # Step 2a: analyze_plan - 带 fallback 的非流式调用
-                    analyze_resp, _ = await call_provider_with_fallback(
-                        workflow_config.analyze_plan,
-                        msgs,
-                        "analyze_plan"
-                    )
-
-                    # 检查 analyze_plan 是否失败（HTTP 错误或返回 error dict）
-                    if isinstance(analyze_resp, dict) and "error" in analyze_resp:
-                        err = analyze_resp["error"]
-                        err_msg = err.get("message", str(err))
-                        err_type = err.get("type", "unknown")
-                        logger.warning(
-                            f"[{request_id}] analyze_plan failed (type={err_type}): {err_msg}. "
-                            "Proceeding to execute_solve without analysis context."
-                        )
-                        # 继续用原始 messages 执行 execute_solve（不注入分析结果）
-                        analyze_text = ""
-                    else:
-                        logger.info(f"[{request_id}] analyze_plan completed, proceeding to execute_solve")
-                        # 正常提取分析文本
-                        analyze_text = ""
-                        if isinstance(analyze_resp, dict):
-                            analyze_content = analyze_resp.get("content", [])
-                            if isinstance(analyze_content, list):
-                                analyze_text = "".join(
-                                    b.get("text", "") for b in analyze_content
-                                    if isinstance(b, dict) and b.get("type") == "text"
-                                )
-                            elif isinstance(analyze_content, str):
-                                analyze_text = analyze_content
-
-                    # Step 2b: execute_solve - 流式调用 minimax 执行
-                    # 将 analyze_plan 的结果注入 messages 作为额外上下文
-                    if analyze_text:
-                        augmented_msgs = list(msgs) + [
-                            {"role": "assistant", "content": f"[analyze_plan] {analyze_text}"},
-                            {"role": "user", "content": "Based on the above analysis, proceed to execute the solution."},
-                        ]
-                    else:
-                        augmented_msgs = msgs
-
-                    execute_route = _resolve_execute_route(body, request_id)
-                    async for chunk in call_provider_streaming(
-                        execute_route,
-                        augmented_msgs,
-                        "execute_solve"
-                    ):
-                        yield chunk
-                else:
-                    # 工具循环回调 → 直接 execute_solve，不走 analyze_plan
-                    logger.info(f"[{request_id}] Task (tool-loop) → execute_solve directly. Last user msg: {preview}")
-                    execute_route = _resolve_execute_route(body, request_id)
-                    async for chunk in call_provider_streaming(
-                        execute_route,
-                        body.get("messages", []),
-                        "execute_solve"
-                    ):
-                        yield chunk
-
-        return StreamingResponse(workflow_stream_generator(), media_type="text/event-stream")
-    else:
-        # 非流式处理：收集所有结果后返回
-        if is_chat:
-            resp, _ = await call_provider(
-                workflow_config.chat_intention,
-                body.get("messages", []),
-                "chat_intention"
-            )
-            return JSONResponse(content=resp)
+                stage = "execute_solve"      # 工具回调 → 直接执行
+            
+            logger.info(f"[{request_id}] Workflow stage (auto-detected): {stage}")
         else:
-            msgs = body.get("messages", [])
+            logger.info(f"[{request_id}] Workflow stage (from metadata): {stage}")
 
-            if is_user_initiated:
-                # 用户主动输入的 task → 先 analyze_plan (qianfan)，再 execute_solve (minimax)
-                logger.info(f"[{request_id}] Task (user-initiated) → analyze_plan then execute_solve")
+        # 3. 根据阶段选择路由和 fallback
+        route_list, step_name = _get_stage_routes(stage, body)
 
-                # Step 2a: analyze_plan
-                analyze_resp, _ = await call_provider_with_fallback(
-                    workflow_config.analyze_plan,
-                    msgs,
-                    "analyze_plan"
+        msgs = body.get("messages", [])
+
+        # Debug: 打印请求详情和路由信息
+        if logger.isEnabledFor(logging.DEBUG):
+            msgs_chars = len(json.dumps(msgs, ensure_ascii=False))
+            msgs_tokens = msgs_chars // 4
+            logger.debug(f"[{request_id}] Request stats: msgs_chars={msgs_chars}, msgs_tokens~{msgs_tokens}, msgs_count={len(msgs)}")
+            # 打印路由决策
+            logger.debug(f"[{request_id}] Routing: stage={stage}, intent={intent}, user_initiated={is_user_initiated}")
+            logger.debug(f"[{request_id}] Route list: {route_list}")
+
+        # /compact 请求特殊处理
+        is_compact = _is_compact_request(body)
+        if is_compact:
+            logger.info(f"[{request_id}] /compact request → direct pass-through, overriding stage to execute_solve")
+            route_list, step_name = _get_stage_routes("execute_solve", body)
+
+        # 4. 流式调用 provider（带 fallback）
+        router = FallbackRouter(route_list, request_id, step_name)
+        router.log_route_hit("RouteList", str(route_list))
+
+        all_failed = True  # unused but kept for compatibility
+        last_error = None
+        last_error_type = "provider_error"
+
+        async def wrapped_call(route: str, msgs: list, step_name: str):
+            nonlocal last_error, last_error_type
+            try:
+                async for chunk in call_provider_streaming(route, msgs, step_name):
+                    yield chunk
+            except Exception as e:
+                last_error = e
+                if "429" in str(e) or "rate limit" in str(e).lower():
+                    last_error_type = "rate_limit_exceeded"
+                elif "context length" in str(e).lower():
+                    last_error_type = "context_length_exceeded"
+                raise
+
+        try:
+            async for chunk in router.call_provider_streaming(wrapped_call, msgs):
+                all_failed = False
+                yield chunk
+            # 正常返回，不走下面的 error 处理
+            return
+
+        except Exception:
+            error_msg = str(last_error) if last_error else f"All {len(route_list)} providers failed"
+            logger.error(f"[{request_id}] {error_msg}")
+            yield _make_streaming_error_sse({"error": {"type": last_error_type, "message": error_msg}})
+
+    return StreamingResponse(workflow_stream_generator(), media_type="text/event-stream")
+
+
+def _convert_openai_to_anthropic(body: dict) -> dict:
+    """将 OpenAI Chat Completions 格式转换为 Anthropic Messages 格式"""
+    result = {
+        "model": body.get("model", "MiniMax-M2.7"),
+        "stream": body.get("stream", False),
+    }
+
+    # 处理 messages
+    messages = body.get("messages", [])
+    anthropic_messages = []
+    system_prompt = None
+
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+
+        # 提取 system prompt
+        if role == "system":
+            system_prompt = content if isinstance(content, str) else None
+            continue
+
+        # 处理 tool 角色：转为 user 消息 + tool_result（跳过 normal append）
+        if role == "tool":
+            tool_use_id = msg.get("tool_call_id", "unknown")
+            tool_content = content or ""
+            if isinstance(tool_content, list):
+                tool_content = " ".join(
+                    item.get("text", "") if isinstance(item, dict) else str(item)
+                    for item in tool_content
                 )
+            tool_msg = {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": str(tool_content)
+                }]
+            }
+            anthropic_messages.append(tool_msg)
+            continue
 
-                # 检查 analyze_plan 是否失败
-                if isinstance(analyze_resp, dict) and "error" in analyze_resp:
-                    err = analyze_resp["error"]
-                    err_msg = err.get("message", str(err))
-                    err_type = err.get("type", "unknown")
-                    logger.warning(
-                        f"[{request_id}] analyze_plan failed (type={err_type}): {err_msg}. "
-                        "Proceeding to execute_solve without analysis context."
-                    )
-                    analyze_text = ""
-                else:
-                    logger.info(f"[{request_id}] analyze_plan completed, proceeding to execute_solve")
-                    analyze_text = ""
-                    if isinstance(analyze_resp, dict):
-                        analyze_content = analyze_resp.get("content", [])
-                        if isinstance(analyze_content, list):
-                            analyze_text = "".join(
-                                b.get("text", "") for b in analyze_content
-                                if isinstance(b, dict) and b.get("type") == "text"
-                            )
-                        elif isinstance(analyze_content, str):
-                            analyze_text = analyze_content
+        # 转换 content
+        if isinstance(content, list):
+            # OpenAI 的 multi-modal content 转为 Anthropic 格式
+            anthropic_content = []
+            for item in content:
+                if isinstance(item, dict):
+                    if item.get("type") == "text":
+                        anthropic_content.append({"type": "text", "text": item.get("text", "")})
+                    elif item.get("type") == "image_url":
+                        # 提取 URL 或 base64
+                        img_data = item.get("image_url", {})
+                        url = img_data.get("url", "") if isinstance(img_data, dict) else ""
+                        if url.startswith("data:"):
+                            # data:image/png;base64,xxxxx
+                            media_type = url.split(";")[0].replace("data:", "") if url else "image/jpeg"
+                            b64 = url.split(",", 1)[1] if "," in url else ""
+                            anthropic_content.append({"type": "image", "source": {"type": "base64", "data": b64, "media_type": media_type}})
+                        else:
+                            anthropic_content.append({"type": "image", "source": {"type": "base64", "data": "", "media_type": "image/jpeg"}})
+                # 非 dict 类型忽略
+            anthropic_messages.append({"role": role, "content": anthropic_content or [{"type": "text", "text": ""}]})
+        elif isinstance(content, str):
+            anthropic_messages.append({"role": role, "content": [{"type": "text", "text": content}]})
+        else:
+            anthropic_messages.append({"role": role, "content": [{"type": "text", "text": str(content or "")}]})
 
-                # Step 2b: execute_solve
-                if analyze_text:
-                    augmented_msgs = list(msgs) + [
-                        {"role": "assistant", "content": f"[analyze_plan] {analyze_text}"},
-                        {"role": "user", "content": "Based on the above analysis, proceed to execute the solution."},
-                    ]
-                else:
-                    augmented_msgs = msgs
+        # 处理 tool_calls：追加到当前 assistant 消息的 content 中
+        tool_calls = msg.get("tool_calls", [])
+        if tool_calls and role == "assistant":
+            for tc in tool_calls:
+                func = tc.get("function", {})
+                try:
+                    args = func.get("arguments", "{}")
+                    if isinstance(args, str):
+                        args = json.loads(args)
+                except (json.JSONDecodeError, TypeError):
+                    args = {}
+                anthropic_messages[-1]["content"].append({
+                    "type": "tool_use",
+                    "id": tc.get("id", f"toolu_{uuid.uuid4().hex[:8]}"),
+                    "name": func.get("name", "unknown"),
+                    "input": args
+                })
 
-                execute_route = _resolve_execute_route(body, request_id)
-                resp, _ = await call_provider(
-                    execute_route,
-                    augmented_msgs,
-                    "execute_solve"
-                )
-            else:
-                # 工具循环回调 → 直接 execute_solve
-                logger.info(f"[{request_id}] Task (tool-loop) → execute_solve directly")
-                execute_route = _resolve_execute_route(body, request_id)
-                resp, _ = await call_provider(
-                    execute_route,
-                    msgs,
-                    "execute_solve"
-                )
+    result["messages"] = anthropic_messages
 
-            if isinstance(resp, dict):
-                content = resp.get("content", [])
-                if isinstance(content, list):
-                    text_preview = "".join(b.get("text","") for b in content if isinstance(b,dict) and b.get("type")=="text")[:300]
-                    logger.info(f"[{request_id}] execute_solve resp preview: {text_preview[:200].replace(chr(10),' ')}")
-            if isinstance(resp, dict) and resp.get("error", {}).get("type") == "context_length_exceeded":
-                raise HTTPException(status_code=400, detail=resp)
-            if isinstance(resp, dict) and resp.get("error", {}).get("type") == "rate_limit_exceeded":
-                raise HTTPException(status_code=429, detail=resp)
-            return JSONResponse(content=resp)
+    # 设置 system prompt
+    if system_prompt:
+        result["system"] = system_prompt
+
+    # 处理其他参数
+    if "max_tokens" in body:
+        result["max_tokens"] = body["max_tokens"]
+
+    if "thinking" in body:
+        result["thinking"] = body["thinking"]
+
+    if "tools" in body:
+        # 转换 OpenAI tools 格式为 Anthropic tools 格式
+        anthropic_tools = []
+        for tool in body["tools"]:
+            if isinstance(tool, dict) and tool.get("type") == "function":
+                func = tool.get("function", {})
+                anthropic_tools.append({
+                    "name": func.get("name", ""),
+                    "description": func.get("description", ""),
+                    "input_schema": func.get("parameters", {"type": "object", "properties": {}})
+                })
+            elif isinstance(tool, dict):
+                anthropic_tools.append(tool)
+        result["tools"] = anthropic_tools
+
+    if "tool_choice" in body:
+        tc = body["tool_choice"]
+        if isinstance(tc, str):
+            result["tool_choice"] = {"type": "auto"}
+        elif isinstance(tc, dict) and tc.get("type") == "function":
+            result["tool_choice"] = {"type": "tool", "name": tc.get("name", "")}
+        else:
+            result["tool_choice"] = tc
+
+    return result
 
 
 def run(host: str | None = None, port: int | None = None, config_path: str | None = None):
-    """启动 Gateway"""
     import uvicorn
+    import asyncio
 
     init_app(config_path)
 
@@ -1360,8 +2092,20 @@ def run(host: str | None = None, port: int | None = None, config_path: str | Non
     port = port or (_config.server.get("port", 3458) if _config else 3458)
 
     logger.info(f"Starting CCRG on {host}:{port}")
-    uvicorn.run(app, host=host, port=port, log_level="info", timeout_graceful_shutdown=5)
 
+    # ✅✅✅ 调试绝杀：强制关闭 loop_factory ✅✅✅
+    config = uvicorn.Config(
+        app,
+        host=host,
+        port=port,
+        log_level="info",
+        timeout_graceful_shutdown=5
+    )
+    # 强制删掉冲突参数，让 PyCharm 调试无法报错
+    config.loop_factory = None
+
+    server = uvicorn.Server(config)
+    asyncio.run(server.serve())
 
 if __name__ == "__main__":
     run()

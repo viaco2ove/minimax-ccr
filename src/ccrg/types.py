@@ -72,6 +72,8 @@ class ProviderConfig:
     default_params: dict = field(default_factory=dict)
     retry: dict = field(default_factory=dict)
     timeout_ms: int | None = None
+    per_request_delay_ms: int | None = None
+    providers_adapter: str = ""
 
     @classmethod
     def from_dict(cls, name: str, data: dict) -> "ProviderConfig":
@@ -86,6 +88,8 @@ class ProviderConfig:
             default_params=data.get("default_params", {}),
             retry=data.get("retry", {}),
             timeout_ms=data.get("timeout_ms"),
+            per_request_delay_ms=data.get("per_request_delay_ms"),
+            providers_adapter=data.get("providers_adapter", ""),
         )
 
 
@@ -93,10 +97,10 @@ class ProviderConfig:
 class WorkflowConfig:
     """Workflow 配置"""
     enabled: bool = False
-    intention_analyze: str = "minimax:MiniMax-M2.7"
-    chat_intention: str = "minimax:MiniMax-M2.7"
-    analyze_plan: str = "qianfan:qianfan-code-latest"
-    execute_solve: str = "minimax:MiniMax-M2.7"
+    intention_analyze: list[str] | str = "minimax:MiniMax-M2.7"
+    chat_intention: list[str] | str = "minimax:MiniMax-M2.7"
+    analyze_plan: list[str] | str = "qianfan:qianfan-code-latest"
+    execute_solve: list[str] | str = "minimax:MiniMax-M2.7"
 
     @classmethod
     def from_dict(cls, data: dict) -> "WorkflowConfig":
@@ -107,6 +111,54 @@ class WorkflowConfig:
             analyze_plan=data.get("analyze_plan", data.get("problem_analyze", "qianfan:qianfan-code-latest")),
             execute_solve=data.get("execute_solve", "minimax:MiniMax-M2.7"),
         )
+
+    def get_intention_analyze_list(self) -> list[str]:
+        """获取 intention_analyze 列表"""
+        if isinstance(self.intention_analyze, str):
+            return [self.intention_analyze]
+        return self.intention_analyze
+
+    def get_chat_intention_list(self) -> list[str]:
+        """获取 chat_intention 列表"""
+        if isinstance(self.chat_intention, str):
+            return [self.chat_intention]
+        return self.chat_intention
+
+    def get_analyze_plan_list(self) -> list[str]:
+        """获取 analyze_plan 列表"""
+        if isinstance(self.analyze_plan, str):
+            return [self.analyze_plan]
+        return self.analyze_plan
+
+    def get_execute_solve_list(self) -> list[str]:
+        """获取 execute_solve 列表"""
+        if isinstance(self.execute_solve, str):
+            return [self.execute_solve]
+        return self.execute_solve
+
+    def get_chat_intention_list(self) -> list[str]:
+        """获取 chat_intention 列表"""
+        if isinstance(self.chat_intention, str):
+            return [self.chat_intention]
+        return self.chat_intention
+
+    def get_intention_analyze_list(self) -> list[str]:
+        """获取 intention_analyze 列表"""
+        if isinstance(self.intention_analyze, str):
+            return [self.intention_analyze]
+        return self.intention_analyze
+
+    def get_chat_intention_single(self) -> str:
+        """获取单个 chat_intention（取第一个）"""
+        if isinstance(self.chat_intention, str):
+            return self.chat_intention
+        return self.chat_intention[0] if self.chat_intention else "minimax:MiniMax-M2.7"
+
+    def get_execute_solve_single(self) -> str:
+        """获取单个 execute_solve（取第一个）"""
+        if isinstance(self.execute_solve, str):
+            return self.execute_solve
+        return self.execute_solve[0] if self.execute_solve else "minimax:MiniMax-M2.7"
 
 
 @dataclass

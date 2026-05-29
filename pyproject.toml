@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ccrg"
+version = "0.1.0"
+description = "Claude Code Router Gateway - AI Request Intelligent Routing"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "python-dotenv",
+    "fastapi>=0.100.0",
+    "httpx>=0.24.0",
+    "uvicorn>=0.20.0",
+]
+
+[project.scripts]
+ccrg = "ccrg.main:run"
+
+[tool.setuptools.packages.find]
+where = ["src"]

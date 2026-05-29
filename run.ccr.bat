@@ -6,8 +6,6 @@ echo   Claude Code Router Gateway
 echo ========================================
 echo.
 
-call run.mmx_p.bat
-
 echo Starting CCRG (port def 3428) ...
 python -m src.ccrg.main
 

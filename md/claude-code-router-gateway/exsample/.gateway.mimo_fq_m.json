@@ -1,0 +1,241 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 3428,
+    "timeout_ms": 600000,
+    "log_level": "debug",
+    "log_file": "logs/ccrg.log",
+    "proxy_url": "",
+    "api_key": "xxx",
+    "claude_path": ""
+  },
+  "env": {
+    "HF_ENDPOINT": "https://hf-mirror.com"
+  },
+  "providers": {
+    "minimax": {
+      "api_base_url": "https://api.minimaxi.com/anthropic",
+      "api_key": "xxx",
+      "protocol": "codeplan_anthropic",
+      "providers_adapter": "minimax",
+      "models": ["MiniMax-M2.7"],
+      "capabilities": {
+        "tool_use": true,
+        "streaming": true,
+        "thinking": true,
+        "vision": true,
+        "max_context": 32000
+      },
+      "per_request_delay_ms": 1500,
+      "cost_tier": "cheap",
+      "timeout_ms": 1200000,
+      "default_params": {
+        "max_tokens": 4096
+      },
+      "retry": {
+        "max_attempts": 3,
+        "retry_on_status": [429, 500, 502, 503]
+      }
+    },
+    "xiaomi": {
+      "api_base_url": "https://token-plan-cn.xiaomimimo.com/anthropic",
+      "api_key": "xxx",
+      "protocol": "codeplan_anthropic",
+      "models": ["mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-omni"],
+      "capabilities": {
+        "tool_use": true,
+        "streaming": true,
+        "thinking": true,
+        "vision": true,
+        "max_context": 32000
+      },
+      "per_request_delay_ms": 0,
+      "cost_tier": "cheap",
+      "timeout_ms": 120000,
+      "retry": {
+        "max_attempts": 3,
+        "retry_on_status": [429, 500, 502, 503]
+      }
+    },
+    "qianfan": {
+      "api_base_url": "https://qianfan.baidubce.com/anthropic/coding",
+      "api_key": "xxx",
+      "protocol": "codeplan_anthropic",
+      "models": ["qianfan-code-latest","ernie-4.5-turbo-20260402","glm-5","kimi-k2.5"],
+      "capabilities": {
+        "tool_use": true,
+        "streaming": true,
+        "thinking": true,
+        "vision": true,
+        "max_context": 32000
+      },
+      "per_request_delay_ms": 1500,
+      "cost_tier": "cheap",
+      "timeout_ms": 120000,
+      "retry": {
+        "max_attempts": 1,
+        "retry_on_status": [429, 500, 502, 503]
+      }
+    },
+   "doubao": {
+      "api_base_url": "https://ark.cn-beijing.volces.com/api/coding",
+      "api_key": "xxx",
+      "protocol": "codeplan_anthropic",
+      "models": ["ark-code-latest","glm-5.1","Kimi-K2.6","doubao-seed-2.0-code","doubao-seed-2.0-pro","doubao-seed-2.0-lite","glm-5.1"],
+      "capabilities": {
+        "tool_use": true,
+        "streaming": true,
+        "thinking": true,
+        "vision": true,
+        "max_context": 32000
+      },
+      "per_request_delay_ms": 1100,
+      "cost_tier": "cheap",
+      "timeout_ms": 120000,
+      "retry": {
+        "max_attempts": 1,
+        "retry_on_status": [429, 500, 502, 503]
+      }
+    },
+    "mmx": {
+      "api_base_url": "https://127.0.0.1:3457",
+      "api_key": "xxx",
+      "protocol": "mmx",
+      "models": ["MiniMax-M2.7"],
+      "capabilities": {
+        "tool_use": true,
+        "streaming": true,
+        "thinking": true,
+        "vision": true,
+        "max_context": 128000
+      },
+      "per_request_delay_ms": 1500,
+      "cost_tier": "cheap",
+      "default_params": {
+        "max_tokens": 4096
+      },
+      "retry": {
+        "max_attempts": 2,
+        "retry_on_status": [429, 500, 502, 503]
+      }
+    },
+    "deepseek": {
+      "api_base_url": "https://api.deepseek.com",
+      "api_key": "xxx",
+      "protocol": "chat_openai",
+      "models": ["deepseek-chat", "deepseek-reasoner", "deepseek-v4-pro","deepseek-v4-flash"],
+      "capabilities": {
+        "tool_use": true,
+        "streaming": true,
+        "thinking": true,
+        "vision": true,
+        "max_context": 64000
+      },
+      "per_request_delay_ms": 1500,
+      "cost_tier": "premium",
+      "retry": {
+        "max_attempts": 2,
+        "retry_on_status": [429, 500, 502, 503]
+      }
+    }
+  },
+  "routing": {
+    "default": "minimax:MiniMax-M2.7",
+    "scenarios": {
+      "background": {
+        "route": "qianfan:qianfan-code-latest",
+        "fallback": ["xiaomi:mimo-v2.5-pro","minimax:MiniMax-M2.7"]
+      },
+      "think": {
+        "route": "xiaomi:mimo-v2.5-pro",
+        "fallback": ["qianfan:qianfan-code-latest","qianfan:qianfan-code-latest","minimax:MiniMax-M2.7"]
+      },
+      "long_context": {
+        "route": "qianfan:qianfan-code-latest",
+        "fallback": ["minimax:MiniMax-M2.7","xiaomi:mimo-v2.5-pro"],
+        "threshold": 80000
+      },
+      "web_search": {
+        "route": "minimax:MiniMax-M2.7",
+        "fallback": ["qianfan:qianfan-code-latest","qianfan:qianfan-code-latest","xiaomi:mimo-v2.5-pro"]
+      },
+      "image": {
+        "route": "qianfan:kimi-k2.5",
+        "fallback": ["mmx:MiniMax-M2.7","xiaomi:mimo-v2.5","minimax:MiniMax-M2.7","xiaomi:mimo-v2.5-pro","minimax:MiniMax-M2.7"]
+      },
+      "compact": {
+        "route": "minimax:MiniMax-M2.7",
+        "fallback": ["xiaomi:mimo-v2.5-pro","qianfan:qianfan-code-latest"]
+      }
+    },
+    "tool_routing": {
+      "cheap_tasks": {
+        "match": [
+          "Read", "Glob", "Grep",
+          "Bash(git status)", "Bash(git diff)", "Bash(git log)",
+          "Bash(ls *)", "Bash(cat *)", "Bash(head *)"
+        ],
+        "match_mode": "any",
+        "route": "minimax:MiniMax-M2.7",
+        "fallback": ["xiaomi:mimo-v2.5-pro","qianfan:qianfan-code-latest"]
+      },
+      "standard_tasks": {
+        "match": ["Edit", "Write", "NotebookEdit","MultiEdit"],
+        "match_mode": "any",
+        "route": "minimax:MiniMax-M2.7",
+        "fallback": ["xiaomi:mimo-v2.5-pro","qianfan:qianfan-code-latest"]
+      },
+      "complex_tasks": {
+        "match": ["Agent", "TaskCreate", "EnterPlanMode"],
+        "match_mode": "any",
+        "route": "xiaomi:mimo-v2.5-pro",
+        "fallback": ["qianfan:qianfan-code-latest","minimax:MiniMax-M2.7"]
+      }
+    },
+    "keyword_routing": {
+      "rules": [
+        {
+          "keywords": ["架构", "architecture", "重构", "refactor", "优化", "设计模式", "模块化",
+            "拆分", "合并", "升级", "改造","分析","设计","处理","你个垃圾","这他妈","白痴","[deep]"],
+          "match_mode": "any",
+          "scope": "user_message",
+          "route": "xiaomi:mimo-v2.5-pro",
+          "fallback": ["qianfan:qianfan-code-latest","minimax:MiniMax-M2.7"]
+        },
+        {
+          "keywords": ["/compact", "compact"],
+          "match_mode": "any",
+          "scope": "user_message",
+          "route": "qianfan:qianfan-code-latest",
+          "fallback": ["xiaomi:mimo-v2.5-pro","minimax:MiniMax-M2.7"]
+        }
+      ]
+    },
+    "priority": ["scenario", "tool_routing", "keyword_routing", "default"],
+    "splitter": {
+      "active_strategy": "semantic_splitter",
+      "semantic_splitter": {
+          "type": "local",
+          "model_name": "moka-ai/m3e-small",
+          "hf_endpoint":"https://hf-mirror.com",
+          "trust_remote_code": true
+      }
+    }
+  },
+  "quota": {
+    "minimax_codeplan": {
+      "enabled": true,
+      "provider": "minimax",
+      "track_usage": true,
+      "fallback_on_exhaust": "qianfan:qianfan-code-latest",
+      "warning_threshold": 0.2
+    }
+  },
+  "workflow": {
+    "enabled": true,
+    "intention_analyze": ["xiaomi:mimo-v2.5-pro","minimax:MiniMax-M2.7","qianfan:qianfan-code-latest"],
+    "chat_intention": ["minimax:MiniMax-M2.7","qianfan:qianfan-code-latest","xiaomi:mimo-v2.5-pro"],
+    "analyze_plan": ["xiaomi:mimo-v2.5-pro","minimax:MiniMax-M2.7"],
+    "execute_solve": ["minimax:MiniMax-M2.7","xiaomi:mimo-v2.5-pro"]
+  }
+}

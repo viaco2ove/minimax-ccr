@@ -68,6 +68,11 @@ def load_config(config_path: str | Path | None = None) -> GatewayConfig:
     # 解析环境变量
     config = resolve_config_env_vars(raw_config)
 
+    # 应用配置中的 env 设置
+    for key, value in config.get("env", {}).items():
+        os.environ[key] = str(value)
+        logger.debug(f"Set environment variable: {key}")
+
     # 转换为强类型配置
     gateway_config = GatewayConfig.from_dict(config)
 

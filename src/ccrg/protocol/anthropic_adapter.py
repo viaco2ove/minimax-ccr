@@ -42,6 +42,94 @@ class AnthropicAdapter(ProtocolAdapter):
         if not capabilities.get("vision", False):
             result = _strip_images(result)
 
+        # 6. 处理 output_config.effort 参数，确保值有效
+        if "output_config" in result:
+            output_config = result["output_config"]
+            if isinstance(output_config, dict) and "effort" in output_config:
+                effort = output_config["effort"]
+                # 豆包等 API 只接受 low, medium, high, max
+                valid_efforts = {"low", "medium", "high", "max"}
+                if effort not in valid_efforts:
+                    # 把 xhigh 映射到 high，其他无效值映射到 medium
+                    if effort == "xhigh":
+                        output_config["effort"] = "high"
+                    else:
+                        output_config["effort"] = "medium"
+
+        # 7. 对部分 Anthropic 兼容的 provider，剥离可能导致 400 的字段
+        #    codeplan_anthropic 协议的 provider (minimax, doubao, qianfan) 对某些
+        #    Anthropic 原生参数支持不完整，直接透传会触发 "invalid params"
+        protocol = provider_config.get("protocol", "")
+        if protocol in ("codeplan_anthropic", "mmx"):
+            # 7a. 剥离 output_config — 这是 Claude Code 特有参数，非原生 Anthropic Messages API
+            if "output_config" in result:
+                del result["output_config"]
+
+            # 7b. 清理 thinking 中的 budget_tokens — 部分 provider 不支持
+            if "thinking" in result and isinstance(result["thinking"], dict):
+                thinking = result["thinking"]
+                # 如果 thinking 类型不是 "enabled"，直接删除整个 thinking
+                if thinking.get("type") not in ("enabled", "disabled"):
+                    del result["thinking"]
+                elif thinking.get("type") == "disabled":
+                    del result["thinking"]
+                elif "budget_tokens" in thinking:
+                    # budget_tokens 可能不被支持，移除
+                    thinking = dict(thinking)
+                    del thinking["budget_tokens"]
+                    result["thinking"] = thinking
+
+            # 7c. 清理 tool_choice — 部分 provider 不支持 "any", "tool" 类型
+            if "tool_choice" in result:
+                tc = result["tool_choice"]
+                if isinstance(tc, dict):
+                    tc_type = tc.get("type", "")
+                    if tc_type in ("any", "tool"):
+                        # 映射 "any"/"tool" → "auto"
+                        result["tool_choice"] = {"type": "auto"}
+
+            # 7d. system 列表格式兼容 — 将 content blocks 列表转为纯字符串
+            #     部分 provider 不支持 system 为 list[{"type":"text","text":"..."}]
+            if "system" in result and isinstance(result["system"], list):
+                parts = []
+                for item in result["system"]:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        text = item.get("text", "")
+                        if text:  # 跳过空文本块
+                            parts.append(text)
+                    elif isinstance(item, str):
+                        parts.append(item)
+                result["system"] = "\n\n".join(parts) if parts else ""
+
+            # 7e. 清理 tools 中的 cache_control — 部分 provider 不支持
+            if "tools" in result and isinstance(result["tools"], list):
+                cleaned_tools = []
+                for tool in result["tools"]:
+                    if isinstance(tool, dict) and "cache_control" in tool:
+                        tool = {k: v for k, v in tool.items() if k != "cache_control"}
+                    cleaned_tools.append(tool)
+                result["tools"] = cleaned_tools
+
+            # 7f. 限制 max_tokens — MiniMax 等 provider 的 output budget 过大会导致
+            #     context window 超限 (input + max_tokens > context_limit)
+            #     MiniMax 128K context，建议 max_tokens 上限 32K
+            MAX_OUTPUT_TOKENS = 32000
+            if "max_tokens" in result:
+                try:
+                    current_max = int(result["max_tokens"])
+                    if current_max > MAX_OUTPUT_TOKENS:
+                        result["max_tokens"] = MAX_OUTPUT_TOKENS
+                except (ValueError, TypeError):
+                    pass
+
+            # 7g. 截断过长的 system prompt — MiniMax 等 provider 的 context window 有限
+            #     MiniMax 128K context，约 32K tokens，系统 prompt 27K 字符已超过安全线
+            MAX_SYSTEM_LENGTH = 8000  # 与 mmx_provider.py 保持一致
+            if "system" in result and isinstance(result["system"], str):
+                system = result["system"]
+                if len(system) > MAX_SYSTEM_LENGTH:
+                    result["system"] = system[:MAX_SYSTEM_LENGTH]
+
         return result
 
     def get_target_url(self, provider_config: dict, model: str | None = None) -> str:
@@ -68,7 +156,7 @@ class AnthropicAdapter(ProtocolAdapter):
 
 
 def _strip_system_reminders(obj: Any) -> Any:
-    """递归移除 system-reminder 块"""
+    """递归移除 system-reminder 块，并清理空内容"""
     if isinstance(obj, dict):
         result = {}
         for k, v in obj.items():
@@ -78,7 +166,17 @@ def _strip_system_reminders(obj: Any) -> Any:
                 result[k] = _strip_system_reminders(v)
         return result
     elif isinstance(obj, list):
-        return [_strip_system_reminders(item) for item in obj]
+        # 过滤空内容块
+        filtered = []
+        for item in obj:
+            stripped = _strip_system_reminders(item)
+            # 跳过空 text block
+            if isinstance(stripped, dict) and stripped.get("type") == "text":
+                text = stripped.get("text", "")
+                if not text or not text.strip():
+                    continue
+            filtered.append(stripped)
+        return filtered
     elif isinstance(obj, str):
         # 移除 <system-reminder>...</system-reminder> 块
         return re.sub(r'<system-reminder>.*?</system-reminder>', '', obj, flags=re.DOTALL).strip()
