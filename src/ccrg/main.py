@@ -546,6 +546,22 @@ async def _handle_request(request: Request) -> Response:
                                 _usage_stats, route_result.matched_rule, start_time, default_timeout
                             )
                         else:
+                            # Debug: 保存剥离后的请求体到文件
+                            if logger.isEnabledFor(logging.DEBUG):
+                                req_dir = Path("logs/req")
+                                req_dir.mkdir(parents=True, exist_ok=True)
+                                req_file = req_dir / f"{request_id}_{prov_name}_strip.json"
+                                with open(req_file, "w", encoding="utf-8") as f:
+                                    json.dump(req_for_provider, f, ensure_ascii=False)
+                                curl_cmd = (
+                                    f"curl -X POST '{prov_target_url}' \\\n"
+                                    f"  -H 'Content-Type: application/json' \\\n"
+                                    f"  -H 'Authorization: Bearer ***' \\\n"
+                                    f"  -H 'anthropic-version: 2023-06-01' \\\n"
+                                    f"  -d @logs/req/{req_file.name}"
+                                )
+                                logger.debug(f"[FallbackRouter] [REQ] [CURL] [{prov_name}]: {req_file} (chars={len(json.dumps(req_for_provider, ensure_ascii=False))})\n{curl_cmd}")
+
                             async with httpx.AsyncClient(timeout=prov_timeout) as client:
                                 response = await client.post(prov_target_url, json=req_for_provider, headers=prov_headers)
                                 response.raise_for_status()
@@ -737,6 +753,21 @@ async def _handle_streaming_with_fallback(
                     if stripped is not original_body:
                         retried_with_stripped.add(prov_name)
                         logger.info(f"[{request_id}] {prov_name} doesn't support some features, stripping and retrying")
+                        # Debug: 保存剥离后的请求体到文件
+                        if logger.isEnabledFor(logging.DEBUG):
+                            req_dir = Path("logs/req")
+                            req_dir.mkdir(parents=True, exist_ok=True)
+                            req_file = req_dir / f"{request_id}_{prov_name}_strip.json"
+                            with open(req_file, "w", encoding="utf-8") as f:
+                                json.dump(stripped, f, ensure_ascii=False)
+                            curl_cmd = (
+                                f"curl -X POST '{target_url}' \\\n"
+                                f"  -H 'Content-Type: application/json' \\\n"
+                                f"  -H 'Authorization: Bearer ***' \\\n"
+                                f"  -H 'anthropic-version: 2023-06-01' \\\n"
+                                f"  -d @logs/req/{req_file.name}"
+                            )
+                            logger.debug(f"[FallbackRouter] [REQ] [CURL] [{prov_name}]: {req_file} (chars={len(json.dumps(stripped, ensure_ascii=False))})\n{curl_cmd}")
                         # 将当前 provider 重新加入队列
                         providers_to_try.insert(provider_index[0], (prov_name, model))
                         # 替换 original_body 为剥离后的版本
