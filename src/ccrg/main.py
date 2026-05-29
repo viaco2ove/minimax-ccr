@@ -657,6 +657,10 @@ async def _handle_streaming_with_fallback(
                         if prov_config.protocol == "chat_openai":
                             converter = OpenAISSEConverter(model)
 
+                        # 用于 Anthropic SSE 事件解析 usage
+                        usage_input_tokens = 0
+                        usage_output_tokens = 0
+
                         first_chunk_sent = False
                         async for line in response.aiter_lines():
                             line = line.strip()
@@ -667,6 +671,25 @@ async def _handle_streaming_with_fallback(
                                 yield f"{line}\n".encode("utf-8")
                                 first_chunk_sent = True
                                 continue
+
+                            # 解析 Anthropic SSE 事件获取 usage
+                            if line.startswith("data: "):
+                                data_str = line[6:].strip()
+                                if data_str.startswith("{"):
+                                    try:
+                                        import json as _json
+                                        event_data = _json.loads(data_str)
+                                        event_type = event_data.get("type", "")
+                                        if event_type == "message_start":
+                                            msg = event_data.get("message", {})
+                                            usage = msg.get("usage", {})
+                                            if not usage_input_tokens:
+                                                usage_input_tokens = usage.get("input_tokens", 0)
+                                        elif event_type == "message_delta":
+                                            usage = event_data.get("usage", {})
+                                            usage_output_tokens = usage.get("output_tokens", 0)
+                                    except Exception:
+                                        pass
 
                             if converter:
                                 raw_chunk = line.encode("utf-8")
@@ -680,14 +703,14 @@ async def _handle_streaming_with_fallback(
 
                         # 流成功完成（正常结束或客户端断开）
                         if first_chunk_sent:
-                            # 从 converter 中提取 token 使用量
+                            # 从 converter 或 SSE 事件中提取 token 使用量
                             if converter and hasattr(converter, "get_usage"):
                                 usage = converter.get_usage()
                                 input_tokens = usage.get("input_tokens", 0)
                                 output_tokens = usage.get("output_tokens", 0)
                             else:
-                                input_tokens = 0
-                                output_tokens = 0
+                                input_tokens = usage_input_tokens
+                                output_tokens = usage_output_tokens
 
                             latency_ms = (time.time() - start_time) * 1000
                             logger.info(f"[{request_id}] Streaming completed from {prov_name}, latency={latency_ms/1000:.3f}s")
@@ -1714,14 +1737,19 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
 
                 # Debug: 打印完整的 curl 命令
                 if logger.isEnabledFor(logging.DEBUG):
-                    # 构建 curl 命令（隐藏 api_key）
-                    masked_headers = dict(prov_headers)
-                    if "Authorization" in masked_headers:
-                        masked_headers["Authorization"] = "Bearer ***"
-                    curl_cmd = f"curl -X POST '{prov_target_url}' \\\n  -H 'Content-Type: application/json' \\\n  -H 'Authorization: Bearer ***' \\\n  -H 'anthropic-version: 2023-06-01' \\\n  -d '{json.dumps(req_for_provider, ensure_ascii=False)[:2000]}...'"
-                    logger.debug(f"[{request_id}] {prov_name} 400 curl cmd:\n{curl_cmd}")
-                    # 打印请求完整 JSON
-                    logger.debug(f"[{request_id}] {prov_name} 400 full req:\n{json.dumps(req_for_provider, ensure_ascii=False, indent=2)[:3000]}")
+                    req_dir = Path("logs/req")
+                    req_dir.mkdir(parents=True, exist_ok=True)
+                    req_file = req_dir / f"{request_id}_{prov_name}_400.json"
+                    with open(req_file, "w", encoding="utf-8") as f:
+                        json.dump(req_for_provider, f, ensure_ascii=False)
+                    curl_cmd = (
+                        f"curl -X POST '{prov_target_url}' \\\n"
+                        f"  -H 'Content-Type: application/json' \\\n"
+                        f"  -H 'Authorization: Bearer ***' \\\n"
+                        f"  -H 'anthropic-version: 2023-06-01' \\\n"
+                        f"  -d @logs/req/{req_file.name}"
+                    )
+                    logger.debug(f"[FallbackRouter] [REQ] [CURL] [{prov_name}]: {req_file} (chars={len(json.dumps(req_for_provider, ensure_ascii=False))})\n{curl_cmd}")
 
                 logger.warning(f"[{request_id}] {prov_name} streaming 400 request debug: {json.dumps(debug_info, ensure_ascii=False, default=str)}")
 
@@ -1757,16 +1785,31 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                     return
 
                 # 非 context 超限的 400 错误（如 invalid params）
-                # 尝试剥离不支持的功能并重试（每个 provider 只重试一次）
+                # 抛出异常让 FallbackRouter 重试
                 if not retried_strip:
                     stripped = _strip_unsupported_features(err_msg, req_for_provider)
                     if stripped is not req_for_provider:
                         retried_strip = True
                         logger.info(f"[{request_id}] {prov_name} doesn't support some features, stripping and retrying")
+                        # Debug: 保存剥离后的请求体到文件
+                        if logger.isEnabledFor(logging.DEBUG):
+                            req_dir = Path("logs/req")
+                            req_dir.mkdir(parents=True, exist_ok=True)
+                            req_file = req_dir / f"{request_id}_{prov_name}_strip.json"
+                            with open(req_file, "w", encoding="utf-8") as f:
+                                json.dump(stripped, f, ensure_ascii=False)
+                            curl_cmd = (
+                                f"curl -X POST '{prov_target_url}' \\\n"
+                                f"  -H 'Content-Type: application/json' \\\n"
+                                f"  -H 'Authorization: Bearer ***' \\\n"
+                                f"  -H 'anthropic-version: 2023-06-01' \\\n"
+                                f"  -d @logs/req/{req_file.name}"
+                            )
+                            logger.debug(f"[FallbackRouter] [REQ] [CURL] [{prov_name}]: {req_file} (chars={len(json.dumps(stripped, ensure_ascii=False))})\n{curl_cmd}")
                         # 更新 local_req_body 用于下次重试
                         local_req_body[0] = stripped
-                        # 不抛异常，正常结束 except 块，下次循环会重试
-                        return
+                        # 抛出异常让 FallbackRouter 重试
+                        raise Exception(f"{prov_name} stripped unsupported features, will retry")
 
                 # 打印完整响应体供调试（error_text 在上面 aread() 时已读取）
                 err_body_str = error_text if error_text else str(e)
