@@ -382,6 +382,44 @@ def init_app(config_path: str | None = None) -> FastAPI:
     return app
 
 
+def _get_auth_header_for_provider(prov_config) -> tuple[str, str]:
+    """获取 provider 的 auth header 名称和值
+
+    Returns:
+        (header_name, header_value) 元组
+    """
+    providers_adapter = getattr(prov_config, 'providers_adapter', None) or getattr(prov_config, 'provider_adapter', None)
+    if providers_adapter == "xiaomi":
+        return ("api-key", prov_config.api_key)
+    else:
+        return ("Authorization", f"Bearer {prov_config.api_key}")
+
+
+def _make_curl_cmd(target_url: str, req_file_path: str, prov_config) -> str:
+    """生成 curl 命令字符串"""
+    auth_name, auth_value = _get_auth_header_for_provider(prov_config)
+    # 隐藏真实 key
+    auth_display = auth_value.split()[-1] if " " in auth_value else auth_value
+    return (
+        f"curl -X POST '{target_url}' \\\n"
+        f"  -H 'Content-Type: application/json' \\\n"
+        f"  -H '{auth_name}: {auth_display}' \\\n"
+        f"  -H 'anthropic-version: 2023-06-01' \\\n"
+        f"  -d @{req_file_path}"
+    )
+
+
+def _build_provider_headers(prov_config) -> dict:
+    """构建 provider 的 HTTP headers"""
+    headers = {
+        "Content-Type": "application/json",
+        "anthropic-version": "2023-06-01",
+    }
+    auth_name, auth_value = _get_auth_header_for_provider(prov_config)
+    headers[auth_name] = auth_value
+    return headers
+
+
 async def _handle_request(request: Request) -> Response:
     """处理 /v1/messages 请求"""
     request_id = f"req_{uuid.uuid4().hex[:8]}"
@@ -462,9 +500,14 @@ async def _handle_request(request: Request) -> Response:
 
             prov_headers = {
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {prov_config.api_key}",
                 "anthropic-version": "2023-06-01",
             }
+            # 根据 providers_adapter 选择 auth header 格式
+            providers_adapter = getattr(prov_config, 'providers_adapter', None) or getattr(prov_config, 'provider_adapter', None)
+            if providers_adapter == "xiaomi":
+                prov_headers["api-key"] = prov_config.api_key
+            else:
+                prov_headers["Authorization"] = f"Bearer {prov_config.api_key}"
 
             # 获取 provider 对应的超时时间
             prov_timeout = (prov_config.timeout_ms or _config.server.get("timeout_ms", 600000)) / 1000
@@ -656,11 +699,7 @@ async def _handle_streaming_with_fallback(
             if not target_url.startswith("http"):
                 target_url = f"http://{target_url}"
 
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {prov_config.api_key}",
-                "anthropic-version": "2023-06-01",
-            }
+            headers = _build_provider_headers(prov_config)
 
             logger.info(f"[{request_id}] Calling {prov_name} at {target_url} (timeout={prov_timeout:.0f}s)")
 
@@ -1409,11 +1448,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
         if not prov_target_url.startswith("http"):
             prov_target_url = f"http://{prov_target_url}"
 
-        prov_headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {prov_config.api_key}",
-            "anthropic-version": "2023-06-01",
-        }
+        prov_headers = _build_provider_headers(prov_config)
 
         prov_timeout = (prov_config.timeout_ms or _config.server.get("timeout_ms", 600000)) / 1000
 
@@ -1597,11 +1632,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
         if not prov_target_url.startswith("http"):
             prov_target_url = f"http://{prov_target_url}"
 
-        prov_headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {prov_config.api_key}",
-            "anthropic-version": "2023-06-01",
-        }
+        prov_headers = _build_provider_headers(prov_config)
 
         prov_timeout = (prov_config.timeout_ms or _config.server.get("timeout_ms", 600000)) / 1000
 
