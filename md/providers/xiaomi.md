@@ -68,3 +68,6 @@
 }
 
 直接 "xiaomi:mimo-v2.5-pro"改成"xiaomi:mimo-v2.5" 吧。然后修复这种情况的fallback 问题。
+然后：
+"xiaomi:mimo-v2.5-pro"]改成
+"xiaomi:mimo-v2.5-pro","xiaomi:mimo-v2.5"]

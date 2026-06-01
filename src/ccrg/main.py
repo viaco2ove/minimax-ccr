@@ -1704,6 +1704,21 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                                 # 直接 yield 原始数据
                                 if data_content == "[DONE]":
                                     break
+
+                                # 检查是否是错误响应（HTTP 200 但 body 是 error JSON）
+                                if data_content.startswith("{"):
+                                    try:
+                                        chunk_data = json.loads(data_content)
+                                        if "error" in chunk_data:
+                                            err_info = chunk_data["error"]
+                                            err_code = err_info.get("code", "")
+                                            err_msg = err_info.get("message", "")
+                                            raise RuntimeError(f"{prov_name} stream returned error: {err_code} - {err_msg}")
+                                    except RuntimeError:
+                                        raise
+                                    except Exception:
+                                        pass
+
                                 yield f"{line}\n".encode("utf-8")
                         elif line.startswith("event: ") and converter:
                             # 有 converter 时，event: 行由 converter 内部处理，跳过

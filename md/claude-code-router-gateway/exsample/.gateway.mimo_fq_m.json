@@ -152,12 +152,12 @@
       },
       "long_context": {
         "route": "qianfan:qianfan-code-latest",
-        "fallback": ["minimax:MiniMax-M2.7","xiaomi:mimo-v2.5-pro"],
+        "fallback": ["minimax:MiniMax-M2.7","xiaomi:mimo-v2.5-pro","xiaomi:mimo-v2.5"],
         "threshold": 80000
       },
       "web_search": {
         "route": "minimax:MiniMax-M2.7",
-        "fallback": ["qianfan:qianfan-code-latest","qianfan:qianfan-code-latest","xiaomi:mimo-v2.5-pro"]
+        "fallback": ["qianfan:qianfan-code-latest","qianfan:qianfan-code-latest","xiaomi:mimo-v2.5-pro","xiaomi:mimo-v2.5"]
       },
       "image": {
         "route": "qianfan:kimi-k2.5",
@@ -234,8 +234,8 @@
   "workflow": {
     "enabled": true,
     "intention_analyze": ["xiaomi:mimo-v2.5-pro","minimax:MiniMax-M2.7","qianfan:qianfan-code-latest"],
-    "chat_intention": ["minimax:MiniMax-M2.7","qianfan:qianfan-code-latest","xiaomi:mimo-v2.5-pro"],
+    "chat_intention": ["minimax:MiniMax-M2.7","qianfan:qianfan-code-latest","xiaomi:mimo-v2.5-pro","xiaomi:mimo-v2.5"],
     "analyze_plan": ["xiaomi:mimo-v2.5-pro","minimax:MiniMax-M2.7"],
-    "execute_solve": ["minimax:MiniMax-M2.7","xiaomi:mimo-v2.5-pro"]
+    "execute_solve": ["minimax:MiniMax-M2.7","xiaomi:mimo-v2.5-pro","xiaomi:mimo-v2.5"]
   }
 }
