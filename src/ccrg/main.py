@@ -498,16 +498,7 @@ async def _handle_request(request: Request) -> Response:
             if not prov_target_url.startswith("http"):
                 prov_target_url = f"http://{prov_target_url}"
 
-            prov_headers = {
-                "Content-Type": "application/json",
-                "anthropic-version": "2023-06-01",
-            }
-            # 根据 providers_adapter 选择 auth header 格式
-            providers_adapter = getattr(prov_config, 'providers_adapter', None) or getattr(prov_config, 'provider_adapter', None)
-            if providers_adapter == "xiaomi":
-                prov_headers["api-key"] = prov_config.api_key
-            else:
-                prov_headers["Authorization"] = f"Bearer {prov_config.api_key}"
+            prov_headers = _build_provider_headers(prov_config)
 
             # 获取 provider 对应的超时时间
             prov_timeout = (prov_config.timeout_ms or _config.server.get("timeout_ms", 600000)) / 1000
@@ -596,13 +587,7 @@ async def _handle_request(request: Request) -> Response:
                                 req_file = req_dir / f"{request_id}_{prov_name}_strip.json"
                                 with open(req_file, "w", encoding="utf-8") as f:
                                     json.dump(req_for_provider, f, ensure_ascii=False)
-                                curl_cmd = (
-                                    f"curl -X POST '{prov_target_url}' \\\n"
-                                    f"  -H 'Content-Type: application/json' \\\n"
-                                    f"  -H 'Authorization: Bearer ***' \\\n"
-                                    f"  -H 'anthropic-version: 2023-06-01' \\\n"
-                                    f"  -d @logs/req/{req_file.name}"
-                                )
+                                curl_cmd = _make_curl_cmd(prov_target_url, f"logs/req/{req_file.name}", prov_config)
                                 logger.debug(f"[FallbackRouter] [REQ] [CURL] [{prov_name}]: {req_file} (chars={len(json.dumps(req_for_provider, ensure_ascii=False))})\n{curl_cmd}")
 
                             async with httpx.AsyncClient(timeout=prov_timeout) as client:
@@ -799,13 +784,7 @@ async def _handle_streaming_with_fallback(
                             req_file = req_dir / f"{request_id}_{prov_name}_strip.json"
                             with open(req_file, "w", encoding="utf-8") as f:
                                 json.dump(stripped, f, ensure_ascii=False)
-                            curl_cmd = (
-                                f"curl -X POST '{target_url}' \\\n"
-                                f"  -H 'Content-Type: application/json' \\\n"
-                                f"  -H 'Authorization: Bearer ***' \\\n"
-                                f"  -H 'anthropic-version: 2023-06-01' \\\n"
-                                f"  -d @logs/req/{req_file.name}"
-                            )
+                            curl_cmd = _make_curl_cmd(target_url, f"logs/req/{req_file.name}", prov_config)
                             logger.debug(f"[FallbackRouter] [REQ] [CURL] [{prov_name}]: {req_file} (chars={len(json.dumps(stripped, ensure_ascii=False))})\n{curl_cmd}")
                         # 将当前 provider 重新加入队列
                         providers_to_try.insert(provider_index[0], (prov_name, model))
@@ -1671,13 +1650,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
             req_file = req_dir / f"{request_id}_{prov_name}.json"
             with open(req_file, "w", encoding="utf-8") as f:
                 json.dump(req_for_provider, f, ensure_ascii=False)
-            curl_cmd = (
-                f"curl -X POST '{prov_target_url}' \\\n"
-                f"  -H 'Content-Type: application/json' \\\n"
-                f"  -H 'Authorization: Bearer ***' \\\n"
-                f"  -H 'anthropic-version: 2023-06-01' \\\n"
-                f"  -d @logs/req/{req_file.name}"
-            )
+            curl_cmd = _make_curl_cmd(prov_target_url, f"logs/req/{req_file.name}", prov_config)
             logger.debug(f"[FallbackRouter] [REQ] [CURL] [{prov_name}]: {req_file} (chars={len(json.dumps(req_for_provider, ensure_ascii=False))})\n{curl_cmd}")
 
         try:
@@ -1804,13 +1777,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                     req_file = req_dir / f"{request_id}_{prov_name}_400.json"
                     with open(req_file, "w", encoding="utf-8") as f:
                         json.dump(req_for_provider, f, ensure_ascii=False)
-                    curl_cmd = (
-                        f"curl -X POST '{prov_target_url}' \\\n"
-                        f"  -H 'Content-Type: application/json' \\\n"
-                        f"  -H 'Authorization: Bearer ***' \\\n"
-                        f"  -H 'anthropic-version: 2023-06-01' \\\n"
-                        f"  -d @logs/req/{req_file.name}"
-                    )
+                    curl_cmd = _make_curl_cmd(prov_target_url, f"logs/req/{req_file.name}", prov_config)
                     logger.debug(f"[FallbackRouter] [REQ] [CURL] [{prov_name}]: {req_file} (chars={len(json.dumps(req_for_provider, ensure_ascii=False))})\n{curl_cmd}")
 
                 logger.warning(f"[{request_id}] {prov_name} streaming 400 request debug: {json.dumps(debug_info, ensure_ascii=False, default=str)}")
@@ -1860,13 +1827,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                             req_file = req_dir / f"{request_id}_{prov_name}_strip.json"
                             with open(req_file, "w", encoding="utf-8") as f:
                                 json.dump(stripped, f, ensure_ascii=False)
-                            curl_cmd = (
-                                f"curl -X POST '{prov_target_url}' \\\n"
-                                f"  -H 'Content-Type: application/json' \\\n"
-                                f"  -H 'Authorization: Bearer ***' \\\n"
-                                f"  -H 'anthropic-version: 2023-06-01' \\\n"
-                                f"  -d @logs/req/{req_file.name}"
-                            )
+                            curl_cmd = _make_curl_cmd(prov_target_url, f"logs/req/{req_file.name}", prov_config)
                             logger.debug(f"[FallbackRouter] [REQ] [CURL] [{prov_name}]: {req_file} (chars={len(json.dumps(stripped, ensure_ascii=False))})\n{curl_cmd}")
                         # 更新 local_req_body 用于下次重试
                         local_req_body[0] = stripped
