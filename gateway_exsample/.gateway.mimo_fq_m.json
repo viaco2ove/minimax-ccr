@@ -41,6 +41,7 @@
       "api_base_url": "https://token-plan-cn.xiaomimimo.com/anthropic",
       "api_key": "xxx",
       "protocol": "codeplan_anthropic",
+      "providers_adapter": "xiaomi",
       "models": ["mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-omni"],
       "capabilities": {
         "tool_use": true,

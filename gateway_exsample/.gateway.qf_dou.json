@@ -9,9 +9,6 @@
     "api_key": "xxx",
     "claude_path": ""
   },
-  "env": {
-    "HF_ENDPOINT": "https://hf-mirror.com"
-  },
   "providers": {
     "minimax": {
       "api_base_url": "https://api.minimaxi.com/anthropic",
@@ -37,31 +34,11 @@
         "retry_on_status": [429, 500, 502, 503]
       }
     },
-    "xiaomi": {
-      "api_base_url": "https://token-plan-cn.xiaomimimo.com/anthropic",
-      "api_key": "xxx",
-      "protocol": "codeplan_anthropic",
-      "models": ["mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-omni"],
-      "capabilities": {
-        "tool_use": true,
-        "streaming": true,
-        "thinking": true,
-        "vision": true,
-        "max_context": 32000
-      },
-      "per_request_delay_ms": 0,
-      "cost_tier": "cheap",
-      "timeout_ms": 120000,
-      "retry": {
-        "max_attempts": 3,
-        "retry_on_status": [429, 500, 502, 503]
-      }
-    },
     "qianfan": {
       "api_base_url": "https://qianfan.baidubce.com/anthropic/coding",
       "api_key": "xxx",
       "protocol": "codeplan_anthropic",
-      "models": ["qianfan-code-latest","ernie-4.5-turbo-20260402","glm-5","kimi-k2.5"],
+      "models": ["qianfan-code-latest","ernie-4.5-turbo-20260402"],
       "capabilities": {
         "tool_use": true,
         "streaming": true,
@@ -140,32 +117,32 @@
     }
   },
   "routing": {
-    "default": "minimax:MiniMax-M2.7",
+    "default": "qianfan:qianfan-code-latest",
     "scenarios": {
       "background": {
         "route": "qianfan:qianfan-code-latest",
-        "fallback": ["xiaomi:mimo-v2.5-pro","minimax:MiniMax-M2.7"]
+        "fallback": ["doubao:ark-code-latest","minimax:MiniMax-M2.7"]
       },
       "think": {
-        "route": "xiaomi:mimo-v2.5-pro",
-        "fallback": ["qianfan:qianfan-code-latest","qianfan:qianfan-code-latest","minimax:MiniMax-M2.7"]
+        "route": "doubao:ark-code-latest",
+        "fallback": ["qianfan:qianfan-code-latest","minimax:MiniMax-M2.7"]
       },
       "long_context": {
-        "route": "qianfan:qianfan-code-latest",
-        "fallback": ["minimax:MiniMax-M2.7","xiaomi:mimo-v2.5-pro","xiaomi:mimo-v2.5"],
+        "route": "doubao:ark-code-latest",
+        "fallback": ["qianfan:qianfan-code-latest","minimax:MiniMax-M2.7"],
         "threshold": 80000
       },
       "web_search": {
-        "route": "minimax:MiniMax-M2.7",
-        "fallback": ["qianfan:qianfan-code-latest","qianfan:qianfan-code-latest","xiaomi:mimo-v2.5-pro","xiaomi:mimo-v2.5"]
+        "route": "qianfan:qianfan-code-latest",
+        "fallback": ["doubao:ark-code-latest","minimax:MiniMax-M2.7"]
       },
       "image": {
-        "route": "qianfan:kimi-k2.5",
-        "fallback": ["mmx:MiniMax-M2.7","xiaomi:mimo-v2.5","minimax:MiniMax-M2.7","xiaomi:mimo-v2.5-pro","minimax:MiniMax-M2.7"]
+        "route": "doubao:doubao-seed-2.0-pro",
+        "fallback": ["mmx:MiniMax-M2.7","minimax:MiniMax-M2.7","doubao:ark-code-latest","minimax:MiniMax-M2.7"]
       },
       "compact": {
-        "route": "minimax:MiniMax-M2.7",
-        "fallback": ["xiaomi:mimo-v2.5-pro","qianfan:qianfan-code-latest"]
+        "route": "qianfan:qianfan-code-latest",
+        "fallback": ["doubao:ark-code-latest","minimax:MiniMax-M2.7"]
       }
     },
     "tool_routing": {
@@ -177,18 +154,18 @@
         ],
         "match_mode": "any",
         "route": "minimax:MiniMax-M2.7",
-        "fallback": ["xiaomi:mimo-v2.5-pro","qianfan:qianfan-code-latest"]
+        "fallback": ["doubao:ark-code-latest","qianfan:qianfan-code-latest"]
       },
       "standard_tasks": {
         "match": ["Edit", "Write", "NotebookEdit","MultiEdit"],
         "match_mode": "any",
         "route": "minimax:MiniMax-M2.7",
-        "fallback": ["xiaomi:mimo-v2.5-pro","qianfan:qianfan-code-latest"]
+        "fallback": ["doubao:ark-code-latest","qianfan:qianfan-code-latest"]
       },
       "complex_tasks": {
         "match": ["Agent", "TaskCreate", "EnterPlanMode"],
         "match_mode": "any",
-        "route": "xiaomi:mimo-v2.5-pro",
+        "route": "doubao:ark-code-latest",
         "fallback": ["qianfan:qianfan-code-latest","minimax:MiniMax-M2.7"]
       }
     },
@@ -199,7 +176,7 @@
             "拆分", "合并", "升级", "改造","分析","设计","处理","你个垃圾","这他妈","白痴","[deep]"],
           "match_mode": "any",
           "scope": "user_message",
-          "route": "xiaomi:mimo-v2.5-pro",
+          "route": "doubao:ark-code-latest",
           "fallback": ["qianfan:qianfan-code-latest","minimax:MiniMax-M2.7"]
         },
         {
@@ -207,19 +184,14 @@
           "match_mode": "any",
           "scope": "user_message",
           "route": "qianfan:qianfan-code-latest",
-          "fallback": ["xiaomi:mimo-v2.5-pro","minimax:MiniMax-M2.7"]
+          "fallback": ["doubao:ark-code-latest","minimax:MiniMax-M2.7"]
         }
       ]
     },
     "priority": ["scenario", "tool_routing", "keyword_routing", "default"],
     "splitter": {
-      "active_strategy": "semantic_splitter",
-      "semantic_splitter": {
-          "type": "local",
-          "model_name": "moka-ai/m3e-small",
-          "hf_endpoint":"https://hf-mirror.com",
-          "trust_remote_code": true
-      }
+          "active_strategy": "llm_splitter",
+          "llm_splitter":["minimax:MiniMax-M2.7","qianfan:qianfan-code-latest"]
     }
   },
   "quota": {
@@ -233,9 +205,9 @@
   },
   "workflow": {
     "enabled": true,
-    "intention_analyze": ["xiaomi:mimo-v2.5-pro","minimax:MiniMax-M2.7","qianfan:qianfan-code-latest"],
-    "chat_intention": ["minimax:MiniMax-M2.7","qianfan:qianfan-code-latest","xiaomi:mimo-v2.5-pro","xiaomi:mimo-v2.5"],
-    "analyze_plan": ["xiaomi:mimo-v2.5-pro","minimax:MiniMax-M2.7"],
-    "execute_solve": ["minimax:MiniMax-M2.7","xiaomi:mimo-v2.5-pro","xiaomi:mimo-v2.5"]
+    "intention_analyze": ["doubao:ark-code-latest","minimax:MiniMax-M2.7"],
+    "chat_intention": ["qianfan:qianfan-code-latest","doubao:ark-code-latest"],
+    "analyze_plan": ["qianfan:qianfan-code-latest","doubao:ark-code-latest"],
+    "execute_solve": ["qianfan:qianfan-code-latest","doubao:ark-code-latest"]
   }
 }
