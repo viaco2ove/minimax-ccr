@@ -1,4 +1,6 @@
 ## codeplan
+"providers_adapter": "xiaomi",
+
 ```
 "xiaomi": {
       "api_base_url": "https://token-plan-cn.xiaomimimo.com/anthropic",

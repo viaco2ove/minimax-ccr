@@ -49,10 +49,12 @@ class SemanticSplitterLocal(Splitter):
         # 遍历所有关键词，计算相似度，找出命中的关键词
         matched = self._match_keywords(model, user_emb)
 
-        logger.debug(f"[SemanticSplitterLocal] matched: {matched}")
+        logger.debug(f"[SemanticSplitterLocal] matched Arr: {matched}")
 
         # 根据命中关键词解析路由
         route_str, fb, intent = self._resolve_route_from_keywords(matched)
+
+        logger.debug(f"[SemanticSplitterLocal] matched :{intent} , route_str:{route_str}, fb:{fb}")
         return RoutingDecision(
             intent=intent,
             route=route_str,
