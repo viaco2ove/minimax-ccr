@@ -80,32 +80,64 @@ class UsageStats:
             with self._lock:
                 conn = self._get_conn()
                 try:
+                    # Provider 级别统计
                     cursor = conn.execute("""
-                        SELECT 
+                        SELECT
                             provider,
                             COUNT(*) as request_count,
                             SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as success_count,
                             SUM(input_tokens) as total_input,
                             SUM(output_tokens) as total_output,
                             SUM(total_tokens) as total_tokens,
-                            AVG(latency_ms) as avg_latency,
-                            GROUP_CONCAT(DISTINCT model) as models
+                            AVG(latency_ms) as avg_latency
                         FROM usage_records
                         WHERE timestamp >= ? AND timestamp < ?
                         GROUP BY provider
                     """, (start.isoformat(), end.isoformat()))
 
                     for row in cursor.fetchall():
-                        provider, req_count, success_count, total_input, total_output, total_tokens, avg_latency, models = row
+                        provider, req_count, success_count, total_input, total_output, total_tokens, avg_latency = row
                         result[provider] = {
                             "request_count": req_count,
-                            "success_count": success_count,
-                            "fail_count": req_count - success_count,
+                            "success_count": success_count or 0,
+                            "fail_count": req_count - (success_count or 0),
                             "input_tokens": total_input or 0,
                             "output_tokens": total_output or 0,
                             "total_tokens": total_tokens or 0,
                             "avg_latency_ms": avg_latency or 0,
-                            "models": [m.strip() for m in (models or "").split(",") if m.strip()],
+                        }
+
+                    # Model 级别统计（按 provider.model 分组）
+                    cursor = conn.execute("""
+                        SELECT
+                            provider,
+                            model,
+                            COUNT(*) as request_count,
+                            SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as success_count,
+                            SUM(input_tokens) as total_input,
+                            SUM(output_tokens) as total_output,
+                            SUM(total_tokens) as total_tokens,
+                            AVG(latency_ms) as avg_latency
+                        FROM usage_records
+                        WHERE timestamp >= ? AND timestamp < ?
+                        GROUP BY provider, model
+                        ORDER BY provider, total_tokens DESC
+                    """, (start.isoformat(), end.isoformat()))
+
+                    for row in cursor.fetchall():
+                        provider, model, req_count, success_count, total_input, total_output, total_tokens, avg_latency = row
+                        if provider not in result:
+                            result[provider] = {"models": {}}
+                        if "models" not in result[provider]:
+                            result[provider]["models"] = {}
+                        result[provider]["models"][model] = {
+                            "request_count": req_count,
+                            "success_count": success_count or 0,
+                            "fail_count": req_count - (success_count or 0),
+                            "input_tokens": total_input or 0,
+                            "output_tokens": total_output or 0,
+                            "total_tokens": total_tokens or 0,
+                            "avg_latency_ms": avg_latency or 0,
                         }
                 finally:
                     conn.close()

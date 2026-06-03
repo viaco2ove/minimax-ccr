@@ -31,8 +31,11 @@
   .section h2{font-size:15px;font-weight:600;margin-bottom:14px;color:#e2e8f0}
   table{width:100%;border-collapse:collapse;font-size:13px}
   th{text-align:left;padding:10px 12px;color:#94a3b8;font-weight:500;border-bottom:1px solid #334155;font-size:12px;text-transform:uppercase;letter-spacing:.3px}
-  td{padding:10px 12px;border-bottom:1px solid #1e293b}
+  td{padding:10px 12px;border-bottom:1px solid #1e293b;cursor:pointer}
   tr:hover td{background:#0f172a}
+  tr.provider-row:hover td{background:#1e293b}
+  .model-row{display:none;background:#0f172a}
+  .model-row td{padding:8px 12px 8px 32px;font-size:12px}
   .tag{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:500}
   .tag-green{background:#064e3b;color:#6ee7b7}
   .tag-red{background:#450a0a;color:#fca5a5}
@@ -145,13 +148,14 @@ function renderRangeTable(data) {
   if (!entries.length) { el.innerHTML = "<div class=\"empty\">该时间段暂无数据</div>"; return; }
   let mx = 0;
   entries.forEach(function(_, d) { if (d.total_tokens > mx) mx = d.total_tokens; });
-  let h = "<table><tr><th>Provider</th><th>Models</th><th>请求数</th><th>成功次数/总次数</th><th>输入</th><th>输出</th><th>总计 Tokens</th><th>平均延迟</th></tr>";
+  let h = "<table><tr><th>Provider</th><th>请求数</th><th>成功/总计</th><th>输入</th><th>输出</th><th>总计 Tokens</th><th>延迟</th></tr>";
   entries.forEach(function(entry, i) {
     const name = entry[0], d = entry[1];
     const c = COLORS[i % COLORS.length];
-    h += "<tr>\
-      <td style=\"font-weight:600;color:" + c + "\">" + name + "</td>\
-      <td style=\"font-size:11px;color:#94a3b8\">" + (d.models || []).join(", ") + "</td>\
+    const hasModels = d.models && Object.keys(d.models).length > 0;
+    const expandIcon = hasModels ? "▶" : "";
+    h += "<tr class=\"provider-row\" onclick=\"toggleModels(this)\" data-expanded=\"false\">\
+      <td style=\"font-weight:600;color:" + c + "\">" + expandIcon + " " + name + "</td>\
       <td>" + fmt(d.request_count) + "</td>\
       <td>" + sTag(d.success_count, d.fail_count) + "</td>\
       <td>" + fmtT(d.input_tokens) + "</td>\
@@ -159,9 +163,37 @@ function renderRangeTable(data) {
       <td>" + fmtT(d.total_tokens) + barH(mx ? d.total_tokens / mx * 100 : 0, c) + "</td>\
       <td>" + fmtMs(d.avg_latency_ms) + "</td>\
     </tr>";
+    // Model 明细行
+    if (hasModels) {
+      let modelMx = 0;
+      Object.values(d.models).forEach(function(m) { if (m.total_tokens > modelMx) modelMx = m.total_tokens; });
+      for (const [modelName, m] of Object.entries(d.models)) {
+        h += "<tr class=\"model-row\">\
+          <td style=\"padding-left:32px;color:#94a3b8\">" + modelName + "</td>\
+          <td>" + fmt(m.request_count) + "</td>\
+          <td>" + sTag(m.success_count, m.fail_count) + "</td>\
+          <td>" + fmtT(m.input_tokens) + "</td>\
+          <td>" + fmtT(m.output_tokens) + "</td>\
+          <td>" + fmtT(m.total_tokens) + barH(modelMx ? m.total_tokens / modelMx * 100 : 0, "#64748b") + "</td>\
+          <td>" + fmtMs(m.avg_latency_ms) + "</td>\
+        </tr>";
+      }
+    }
   });
   h += "</table>";
   el.innerHTML = h;
+}
+
+function toggleModels(row) {
+  const expanded = row.getAttribute("data-expanded") === "true";
+  const icon = row.querySelector("td").textContent.trim().startsWith("▶") ? "▼" : "▶";
+  row.querySelector("td").textContent = icon + " " + row.querySelector("td").textContent.replace(/^[▶▼]\s*/, "");
+  row.setAttribute("data-expanded", !expanded);
+  let sibling = row.nextElementSibling;
+  while (sibling && sibling.classList.contains("model-row")) {
+    sibling.style.display = expanded ? "none" : "table-row";
+    sibling = sibling.nextElementSibling;
+  }
 }
 
 function renderSummaryTable(summary) {

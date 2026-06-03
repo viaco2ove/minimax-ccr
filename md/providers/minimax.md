@@ -38,3 +38,8 @@
 ## providers_adapter
 "providers_adapter": "minimax" 针对minimax 官网 接口 的/使用的适配器  
 # ccswitch 是如何对接minimax 
+
+## 性价比问题
+升级新套餐后不管饱了！
+然后MiniMax-M2.7-highspeed 这个模型不推荐使用，贵一倍，建议使用MiniMax-M2.7。
+MiniMax-M3 又贵又傻，谨慎使用。
