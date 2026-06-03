@@ -18,7 +18,7 @@
       "api_key": "xxx",
       "protocol": "codeplan_anthropic",
       "providers_adapter": "minimax",
-      "models": ["MiniMax-M2.7","MiniMax-M2.7-highspeed","MiniMax-M3"],
+      "models": ["MiniMax-M2.7","MiniMax-M3"],
       "capabilities": {
         "tool_use": true,
         "streaming": true,
