@@ -379,6 +379,11 @@ def init_app(config_path: str | None = None) -> FastAPI:
             "routing_priority": priority,
         }
 
+    # ── MCP Server 端点（与 CCRG 共用端口）─────────────────────────
+
+    from .mcp_server.server import register_routes
+    register_routes(app, lambda: f"http://127.0.0.1:{_config.server.get('port', 3428)}" if _config else "http://127.0.0.1:3428")
+
     return app
 
 
@@ -588,7 +593,7 @@ async def _handle_request(request: Request) -> Response:
                                 with open(req_file, "w", encoding="utf-8") as f:
                                     json.dump(req_for_provider, f, ensure_ascii=False)
                                 curl_cmd = _make_curl_cmd(prov_target_url, f"logs/req/{req_file.name}", prov_config)
-                                logger.debug(f"[FallbackRouter] [REQ] [CURL] [{prov_name}]: {req_file} (chars={len(json.dumps(req_for_provider, ensure_ascii=False))})\n{curl_cmd}")
+                                logger.debug(f"[FallbackRouter] [REQ] [CURL] [{prov_name}] [{model}]: {req_file} (chars={len(json.dumps(req_for_provider, ensure_ascii=False))})\n{curl_cmd}")
 
                             async with httpx.AsyncClient(timeout=prov_timeout) as client:
                                 response = await client.post(prov_target_url, json=req_for_provider, headers=prov_headers)
@@ -1651,7 +1656,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
             with open(req_file, "w", encoding="utf-8") as f:
                 json.dump(req_for_provider, f, ensure_ascii=False)
             curl_cmd = _make_curl_cmd(prov_target_url, f"logs/req/{req_file.name}", prov_config)
-            logger.debug(f"[FallbackRouter] [REQ] [CURL] [{prov_name}]: {req_file} (chars={len(json.dumps(req_for_provider, ensure_ascii=False))})\n{curl_cmd}")
+            logger.debug(f"[FallbackRouter] [REQ] [CURL] [{prov_name}] [{model}]: {req_file} (chars={len(json.dumps(req_for_provider, ensure_ascii=False))})\n{curl_cmd}")
 
         try:
             async with httpx.AsyncClient(timeout=prov_timeout) as client:
@@ -1793,7 +1798,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                     with open(req_file, "w", encoding="utf-8") as f:
                         json.dump(req_for_provider, f, ensure_ascii=False)
                     curl_cmd = _make_curl_cmd(prov_target_url, f"logs/req/{req_file.name}", prov_config)
-                    logger.debug(f"[FallbackRouter] [REQ] [CURL] [{prov_name}]: {req_file} (chars={len(json.dumps(req_for_provider, ensure_ascii=False))})\n{curl_cmd}")
+                    logger.debug(f"[FallbackRouter] [REQ] [CURL] [{prov_name}] [{model}]: {req_file} (chars={len(json.dumps(req_for_provider, ensure_ascii=False))})\n{curl_cmd}")
 
                 logger.warning(f"[{request_id}] {prov_name} streaming 400 request debug: {json.dumps(debug_info, ensure_ascii=False, default=str)}")
 

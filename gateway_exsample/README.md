@@ -8,16 +8,18 @@
 
 ## 文件清单
 
-| 文件名 | 主要 Provider | 推荐场景 |
-|---|---|---|
-| `.gateway.mimo_fq_m.json` | xiaomi + qianfan + minimax | ⭐ **推荐：日常主力（最低成本）** |
-| `.gateway.mimo_m3.json` | xiaomi + minimax-M3 | ⭐ **推荐：需要 M3 能力时** |
+| 文件名 | 主要 Provider | 推荐场景                      |
+|---|---|---------------------------|
+| `.gateway.mimo_fq_m.json` | xiaomi + qianfan + minimax | ⭐ **推荐：日常主力（最低成本）**       |
+| `.gateway.mimo_m3.json` | xiaomi + minimax-M3 | ⭐ **推荐：需要 M3 能力时**        |
 | `.gateway.dou_q_m.json` | minimax + doubao + qianfan | minimax 默认 + 128K context |
-| `.gateway.qf_dou.json` | qianfan + doubao + minimax | 百度千帆优先（稳定性强） |
-| `.gateway.m3.json` | xiaomi + minimax-M3 | M3 作为主力 |
-| `.gateway.exsample.v2.json` | minimax + doubao + qianfan | v2 baseline（3 平台） |
-| `.gateway.json` | minimax + qianfan + doubao | 开发测试（端口 3429） |
-| `.gateway.exsample.json` | minimax + qianfan | 最简 4 provider 入门 |
+| `.gateway.qf_dou.json` | qianfan + doubao + minimax | 百度千帆优先（稳定性强）              |
+| `.gateway.m3.json` | xiaomi + minimax-M3 | M3 作为主力                   |
+| `.gateway.exsample.v2.json` | minimax + doubao + qianfan | v2 baseline（3 平台）         |
+| `.gateway.json` | minimax + qianfan + doubao | 开发测试（端口 3429）             |
+| `.gateway.exsample.json` | minimax + qianfan | 最简 4 provider 入门          |
+| `.gateway.m3_main.mimo_small.json` | xiaomi + minimax-M3 | M3 作为主力                   |
+| `.gateway.mimo_main.m3_small.json` | xiaomi + minimax-M3 | xiaomi 作为主力               |
 
 ---
 

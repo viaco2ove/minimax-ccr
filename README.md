@@ -122,6 +122,8 @@ cd currpath
 
   如果 3458 还有进程，用 taskkill /F /PID <PID> 杀掉即可。
 
+## 运行 on PyCharm
+[debug.Pycharm.md](md/code/debug.Pycharm.md)
 ## 日志标签
 [logtag.md](md/code/logtag.md)
 
