@@ -141,31 +141,31 @@
     }
   },
   "routing": {
-    "default": "minimax:MiniMax-M2.7-highspeed",
+    "default": "minimax:MiniMax-M2.7",
     "scenarios": {
       "background": {
         "route": "minimax:MiniMax-M3",
-        "fallback": ["xiaomi:mimo-v2.5-pro","minimax:MiniMax-M3","minimax:MiniMax-M2.7-highspeed"]
+        "fallback": ["xiaomi:mimo-v2.5-pro","minimax:MiniMax-M3","minimax:MiniMax-M2.7"]
       },
       "think": {
         "route": "xiaomi:mimo-v2.5-pro",
-        "fallback": [ "minimax:MiniMax-M3","minimax:MiniMax-M2.7-highspeed", "xiaomi:mimo-v2.5-pro","minimax:MiniMax-M2.7-highspeed"]
+        "fallback": [ "minimax:MiniMax-M3","minimax:MiniMax-M2.7", "xiaomi:mimo-v2.5-pro","minimax:MiniMax-M2.7"]
       },
       "long_context": {
         "route": "minimax:MiniMax-M3",
-        "fallback": ["xiaomi:mimo-v2.5-pro", "minimax:MiniMax-M2.7-highspeed","xiaomi:mimo-v2.5-pro","xiaomi:mimo-v2.5"],
+        "fallback": ["xiaomi:mimo-v2.5-pro", "minimax:MiniMax-M2.7","xiaomi:mimo-v2.5-pro","xiaomi:mimo-v2.5"],
         "threshold": 80000
       },
       "web_search": {
-        "route": "minimax:MiniMax-M2.7-highspeed",
+        "route": "minimax:MiniMax-M2.7",
         "fallback": [ "minimax:MiniMax-M3","minimax:MiniMax-M2.7", "minimax:MiniMax-M3","xiaomi:mimo-v2.5-pro","xiaomi:mimo-v2.5"]
       },
       "image": {
         "route": "minimax:MiniMax-M3",
-        "fallback": ["mmx:MiniMax-M2.7","xiaomi:mimo-v2.5","minimax:MiniMax-M2.7-highspeed","xiaomi:mimo-v2.5-pro","minimax:MiniMax-M2.7"]
+        "fallback": ["mmx:MiniMax-M2.7","xiaomi:mimo-v2.5","minimax:MiniMax-M2.7","xiaomi:mimo-v2.5-pro","minimax:MiniMax-M2.7"]
       },
       "compact": {
-        "route": "minimax:MiniMax-M2.7-highspeed",
+        "route": "minimax:MiniMax-M2.7",
         "fallback": ["xiaomi:mimo-v2.5","minimax:MiniMax-M3"]
       }
     },
@@ -177,20 +177,20 @@
           "Bash(ls *)", "Bash(cat *)", "Bash(head *)"
         ],
         "match_mode": "any",
-        "route": "minimax:MiniMax-M2.7-highspeed",
+        "route": "minimax:MiniMax-M2.7",
         "fallback": ["xiaomi:mimo-v2.5-pro","minimax:MiniMax-M3"]
       },
       "standard_tasks": {
         "match": ["Edit", "Write", "NotebookEdit","MultiEdit"],
         "match_mode": "any",
-        "route": "minimax:MiniMax-M2.7-highspeed",
+        "route": "minimax:MiniMax-M2.7",
         "fallback": ["xiaomi:mimo-v2.5-pro","minimax:MiniMax-M3"]
       },
       "complex_tasks": {
         "match": ["Agent", "TaskCreate", "EnterPlanMode"],
         "match_mode": "any",
         "route": "minimax:MiniMax-M3",
-        "fallback": [ "minimax:MiniMax-M2.7-highspeed", "xiaomi:mimo-v2.5-pro","xiaomi:mimo-v2.5","minimax:MiniMax-M3"]
+        "fallback": [ "minimax:MiniMax-M2.7", "xiaomi:mimo-v2.5-pro","xiaomi:mimo-v2.5","minimax:MiniMax-M3"]
       }
     },
     "keyword_routing": {
@@ -201,14 +201,14 @@
           "match_mode": "any",
           "scope": "user_message",
           "route": "xiaomi:mimo-v2.5-pro",
-          "fallback": [ "minimax:MiniMax-M3","minimax:MiniMax-M2.7-highspeed", "xiaomi:mimo-v2.5-pro","xiaomi:mimo-v2.5"]
+          "fallback": [ "minimax:MiniMax-M3","minimax:MiniMax-M2.7", "xiaomi:mimo-v2.5-pro","xiaomi:mimo-v2.5"]
         },
         {
           "keywords": ["/compact", "compact"],
           "match_mode": "any",
           "scope": "user_message",
-          "route": "minimax:MiniMax-M2.7-highspeed",
-          "fallback": ["xiaomi:mimo-v2.5","minimax:MiniMax-M2.7-highspeed","minimax:MiniMax-M3"]
+          "route": "minimax:MiniMax-M2.7",
+          "fallback": ["xiaomi:mimo-v2.5","minimax:MiniMax-M2.7","minimax:MiniMax-M3"]
         }
       ]
     },
@@ -234,9 +234,9 @@
   },
   "workflow": {
     "enabled": true,
-    "intention_analyze": ["xiaomi:mimo-v2.5-pro", "minimax:MiniMax-M3","minimax:MiniMax-M2.7-highspeed", "xiaomi:mimo-v2.5-pro","xiaomi:mimo-v2.5"],
-    "chat_intention": [ "minimax:MiniMax-M2.7-highspeed", "minimax:MiniMax-M3","xiaomi:mimo-v2.5-pro","xiaomi:mimo-v2.5"],
-    "analyze_plan": ["xiaomi:mimo-v2.5-pro","minimax:MiniMax-M3","minimax:MiniMax-M2.7-highspeed"],
-    "execute_solve": ["minimax:MiniMax-M3","minimax:MiniMax-M2.7-highspeed","xiaomi:mimo-v2.5-pro","xiaomi:mimo-v2.5"]
+    "intention_analyze": ["xiaomi:mimo-v2.5-pro", "minimax:MiniMax-M3","minimax:MiniMax-M2.7", "xiaomi:mimo-v2.5-pro","xiaomi:mimo-v2.5"],
+    "chat_intention": [ "minimax:MiniMax-M2.7", "minimax:MiniMax-M3","xiaomi:mimo-v2.5-pro","xiaomi:mimo-v2.5"],
+    "analyze_plan": ["xiaomi:mimo-v2.5-pro","minimax:MiniMax-M3","minimax:MiniMax-M2.7"],
+    "execute_solve": ["minimax:MiniMax-M3","minimax:MiniMax-M2.7","xiaomi:mimo-v2.5-pro","xiaomi:mimo-v2.5"]
   }
 }
