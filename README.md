@@ -12,6 +12,8 @@
 CCRG 不用当「大脑」，只当「指挥 + 分流管道」
 扁平化命中机制。内部不做流程，而是摊开分流。
 去命中providers，但是claude code cli 能流式响应的效果。
+
+[README.md](gateway_exsample/README.md)
 ### 尽量让每个 provider 都能流式响应。
 claude code cli 一次请求，CCRG 也只发出一个请求（除了fallback 和失败重试的的等兜底）
 
