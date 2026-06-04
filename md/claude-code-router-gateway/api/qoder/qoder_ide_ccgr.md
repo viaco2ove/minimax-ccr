@@ -39,6 +39,7 @@ Users > viaco > AppData > Roaming > Qoder > SharedClientCache >mcp.json
         "@anthropic-ai/mcp-server-http",
         "http://127.0.0.1:3428/mcp/npx"
       ],
+      "timeout": 120000,
       "env": {
         "ANTHROPIC_API_KEY": "local"
       },
@@ -53,7 +54,8 @@ Users > viaco > AppData > Roaming > Qoder > SharedClientCache >mcp.json
   "mcpServers": {
     "ccrg": {
       "type": "sse",
-      "url": "http://127.0.0.1:3428/mcp/sse",
+      "url": "http://127.0.0.1:3429/mcp/sse",
+      "timeout": 120000,
       "headers": {
         "Authorization": "Bearer your-ccrg-api-key"
       }
@@ -145,11 +147,13 @@ qoder 中：@ccrg_route
   7. 测试复杂的编程能力：
 qoder 中：
 @ccrg_code  根据script/kettle/business_job/J03_business_online_consult_job/J03_chat_group_job.kjb 编写 script/data_check 和script/kettle/data_check_job 
+效果: 效果不佳！qoder 自己解决问题不走mcp
 
-
-## skill
+## 增加skill：ccrg-code 
 C:\Users\xxx\.qoder\skills\ccrg-code\SKILL.md
 [SKILL.md](SKILL.md)
+qoder 中： /ccrg-code {问题内容}
+效果: 效果还行，
 
 ## 参考文档
 
