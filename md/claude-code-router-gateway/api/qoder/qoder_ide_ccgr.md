@@ -146,6 +146,11 @@ qoder 中：@ccrg_route
 qoder 中：
 @ccrg_code  根据script/kettle/business_job/J03_business_online_consult_job/J03_chat_group_job.kjb 编写 script/data_check 和script/kettle/data_check_job 
 
+
+## skill
+C:\Users\xxx\.qoder\skills\ccrg-code\SKILL.md
+[SKILL.md](SKILL.md)
+
 ## 参考文档
 
 - [CCRG 概览](../../overview.md)

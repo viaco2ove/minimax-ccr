@@ -120,6 +120,60 @@ MCP_TOOLS = [
             "type": "object",
             "properties": {}
         }
+    },
+    {
+        "name": "ccrg_code",
+        "description": "复杂编程工具 — 通过 CCRG LLM 执行多步骤编程任务（读文件、写代码、执行命令、分析需求）。支持 task_type 切换不同编程动作。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_type": {
+                    "type": "string",
+                    "enum": ["read", "write", "exec", "plan", "review", "chat"],
+                    "description": "任务类型：read=读取文件，write=写入/修改文件，exec=执行命令，plan=规划任务，review=审查代码，chat=普通对话"
+                },
+                "task": {
+                    "type": "string",
+                    "description": "任务描述（必须）"
+                },
+                "files": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "相关文件路径列表",
+                    "default": []
+                },
+                "file_contents": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "content": {"type": "string"}
+                        },
+                        "required": ["path", "content"]
+                    },
+                    "description": "文件内容（用于 write 操作）",
+                    "default": []
+                },
+                "commands": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "要执行的命令列表（用于 exec 操作）",
+                    "default": []
+                },
+                "context": {
+                    "type": "string",
+                    "description": "额外上下文信息（如项目结构、错误日志等）",
+                    "default": ""
+                },
+                "model": {
+                    "type": "string",
+                    "description": "指定模型（留空自动路由）",
+                    "default": ""
+                }
+            },
+            "required": ["task_type", "task"]
+        }
     }
 ]
 
@@ -242,6 +296,209 @@ async def _handle_ccrg_health(args: dict, base_url: str) -> dict:
         return {"status": "error", "error": str(e)}
 
 
+async def _handle_ccrg_code(args: dict, base_url: str) -> dict:
+    """复杂编程工具 — 通过 LLM 执行多步骤编程任务"""
+    import os
+    import subprocess
+
+    task_type = args.get("task_type", "chat")
+    task = args.get("task", "")
+    files = args.get("files", [])
+    file_contents = args.get("file_contents", [])
+    commands = args.get("commands", [])
+    context = args.get("context", "")
+    model = args.get("model", "")
+
+    # 根据 task_type 构建 LLM prompt
+    if task_type == "read":
+        # 读取文件内容
+        file_data = {}
+        for fp in files:
+            try:
+                abs_path = os.path.abspath(fp)
+                with open(abs_path, "r", encoding="utf-8") as f:
+                    file_data[fp] = f.read()
+            except Exception as e:
+                file_data[fp] = f"ERROR: {e}"
+
+        # 让 LLM 分析文件内容
+        system_prompt = "你是一个高级编程助手。用户提供了项目文件，请分析并回答问题。"
+        user_msg = f"## 任务\n{task}\n\n"
+        if context:
+            user_msg += f"## 额外上下文\n{context}\n\n"
+        user_msg += "## 项目文件\n"
+        for fp, content in file_data.items():
+            user_msg += f"\n### {fp}\n```\n{content[:5000]}\n```\n"
+
+        return await _call_llm(base_url, system_prompt, user_msg, model)
+
+    elif task_type == "write":
+        # 让 LLM 生成/修改代码
+        system_prompt = "你是一个高级编程助手。请根据任务生成完整的代码。输出格式为 JSON 数组，每个元素包含 path 和 content 字段。只输出 JSON，不要其他内容。"
+        user_msg = f"## 任务\n{task}\n\n"
+        if context:
+            user_msg += f"## 额外上下文\n{context}\n\n"
+        if file_contents:
+            user_msg += "## 现有文件\n"
+            for fc in file_contents:
+                user_msg += f"\n### {fc['path']}\n```\n{fc['content'][:5000]}\n```\n"
+        elif files:
+            # 自动读取文件
+            for fp in files:
+                try:
+                    abs_path = os.path.abspath(fp)
+                    with open(abs_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    user_msg += f"\n### {fp}\n```\n{content[:5000]}\n```\n"
+                except Exception:
+                    pass
+
+        result = await _call_llm(base_url, system_prompt, user_msg, model)
+
+        # 尝试解析 LLM 输出并写入文件
+        if "text" in result:
+            written_files = []
+            try:
+                import json as _json
+                # 提取 JSON 部分
+                text = result["text"]
+                start = text.find("[")
+                end = text.rfind("]") + 1
+                if start >= 0 and end > start:
+                    code_blocks = _json.loads(text[start:end])
+                    for block in code_blocks:
+                        fp = block.get("path", "")
+                        content = block.get("content", "")
+                        if fp and content:
+                            abs_path = os.path.abspath(fp)
+                            os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+                            with open(abs_path, "w", encoding="utf-8") as f:
+                                f.write(content)
+                            written_files.append(fp)
+                    result["written_files"] = written_files
+            except Exception as e:
+                result["write_error"] = str(e)
+
+        return result
+
+    elif task_type == "exec":
+        # 执行命令并让 LLM 分析结果
+        results = {}
+        for cmd in commands:
+            try:
+                proc = subprocess.run(
+                    cmd, shell=True, capture_output=True, text=True,
+                    timeout=30, encoding="utf-8", errors="replace"
+                )
+                results[cmd] = {
+                    "stdout": proc.stdout[:5000],
+                    "stderr": proc.stderr[:2000],
+                    "returncode": proc.returncode
+                }
+            except subprocess.TimeoutExpired:
+                results[cmd] = {"error": "timeout (30s)"}
+            except Exception as e:
+                results[cmd] = {"error": str(e)}
+
+        # 让 LLM 分析执行结果
+        system_prompt = "你是一个高级编程助手。用户执行了一些命令，请分析结果并给出建议。"
+        user_msg = f"## 任务\n{task}\n\n"
+        if context:
+            user_msg += f"## 额外上下文\n{context}\n\n"
+        user_msg += "## 命令执行结果\n"
+        for cmd, res in results.items():
+            user_msg += f"\n### `{cmd}`\n"
+            if "error" in res:
+                user_msg += f"错误: {res['error']}\n"
+            else:
+                user_msg += f"退出码: {res['returncode']}\n"
+                if res["stdout"]:
+                    user_msg += f"stdout:\n```\n{res['stdout'][:2000]}\n```\n"
+                if res["stderr"]:
+                    user_msg += f"stderr:\n```\n{res['stderr'][:1000]}\n```\n"
+
+        analysis = await _call_llm(base_url, system_prompt, user_msg, model)
+        analysis["command_results"] = results
+        return analysis
+
+    elif task_type == "plan":
+        # 规划任务
+        system_prompt = (
+            "你是一个高级编程架构师。请根据用户需求制定详细的实现计划。\n"
+            "输出格式：\n"
+            "1. 需求分析\n"
+            "2. 技术方案（包括要修改/新建的文件）\n"
+            "3. 实现步骤（每步具体操作）\n"
+            "4. 测试验证\n"
+            "请用中文回答，步骤要具体可执行。"
+        )
+        user_msg = f"## 任务\n{task}\n\n"
+        if context:
+            user_msg += f"## 额外上下文\n{context}\n\n"
+        if files:
+            user_msg += "## 相关文件\n" + "\n".join(f"- `{f}`" for f in files) + "\n"
+        user_msg += "\n请制定详细的实现计划。"
+        return await _call_llm(base_url, system_prompt, user_msg, model)
+
+    elif task_type == "review":
+        # 审查代码
+        system_prompt = "你是一个高级代码审查专家。请审查代码并给出改进建议。关注：正确性、安全性、性能、可维护性。"
+        user_msg = f"## 审查任务\n{task}\n\n"
+        if context:
+            user_msg += f"## 额外上下文\n{context}\n\n"
+        for fc in file_contents:
+            user_msg += f"\n### {fc['path']}\n```\n{fc['content'][:8000]}\n```\n"
+        if not file_contents and files:
+            for fp in files:
+                try:
+                    abs_path = os.path.abspath(fp)
+                    with open(abs_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    user_msg += f"\n### {fp}\n```\n{content[:8000]}\n```\n"
+                except Exception:
+                    pass
+        return await _call_llm(base_url, system_prompt, user_msg, model)
+
+    else:
+        # chat — 普通对话
+        system_prompt = "你是一个高级编程助手。"
+        user_msg = task
+        if context:
+            user_msg = f"{context}\n\n{task}"
+        return await _call_llm(base_url, system_prompt, user_msg, model)
+
+
+async def _call_llm(base_url: str, system: str, user_msg: str, model: str = "") -> dict:
+    """通过 CCRG 的 /v1/chat/completions 调用 LLM"""
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user_msg}
+    ]
+    body: dict[str, Any] = {
+        "messages": messages,
+        "stream": False
+    }
+    if model:
+        body["model"] = model
+
+    async with httpx.AsyncClient(timeout=180) as client:
+        resp = await client.post(
+            f"{base_url}/v1/chat/completions",
+            json=body,
+            headers={"Content-Type": "application/json"}
+        )
+        resp.raise_for_status()
+        result = resp.json()
+
+    choices = result.get("choices", [])
+    text = choices[0].get("message", {}).get("content", "") if choices else ""
+    return {
+        "text": text,
+        "model": result.get("model", ""),
+        "usage": result.get("usage", {})
+    }
+
+
 # ─── 工具分发 ───────────────────────────────────────────────────
 
 _HANDLERS = {
@@ -249,6 +506,7 @@ _HANDLERS = {
     "ccrg_route": _handle_ccrg_route,
     "ccrg_stats": _handle_ccrg_stats,
     "ccrg_health": _handle_ccrg_health,
+    "ccrg_code": _handle_ccrg_code,
 }
 
 
