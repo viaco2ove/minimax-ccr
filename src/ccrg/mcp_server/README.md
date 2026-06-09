@@ -11,7 +11,7 @@ MCP 路由直接挂载到 CCRG 主服务（共用端口），无需单独启动�
 | 工具 | 说明 |
 |---|---|
 | `ccrg_chat` | 发送 Chat 请求（支持 openai / anthropic 两种格式）|
-| `ccrg_code` | **复杂编程工具** — 读文件、写代码、执行命令、规划任务、审查代码 |
+| `ccrg_code` | **编程 Agent** — 服务端执行文件读写和命令，LLM 思考+生成代码，支持 loop 自动修复 |
 | `ccrg_route` | 预览路由决策（不发送请求）|
 | `ccrg_stats` | 获取使用统计 |
 | `ccrg_health` | 检查 CCRG 健康状态 |
@@ -24,12 +24,29 @@ qoder IDE 可以通过 `ccrg_code` 工具实现多步骤编程：
 
 | 类型 | 说明 | 输入参数 |
 |---|---|---|
+| `read` | 服务端读文件 → LLM 分析 | task + files |
+| `write` | LLM 生成代码 → **自动写入磁盘** | task + files/file_contents |
+| `exec` | 服务端执行命令 → LLM 分析结果 | task + commands |
+| `loop` | **自动修复循环**：exec→失败→write修复→exec→... | task + commands + files + max_rounds |
 | `plan` | 规划任务 | task + files/context |
-| `read` | 读取并分析文件 | task + files/context |
-| `write` | 生成/修改代码 | task + files/file_contents（自动写入）|
-| `exec` | 执行命令并分析 | task + commands/context |
 | `review` | 审查代码 | task + files/file_contents |
-| `chat` | 普通编程对话 | task + context |
+| `chat` | 普通对话 | task + context |
+
+### loop 模式（Agent 自动修复）
+
+最强大的模式，像 codex cli / claude code 一样：
+
+```
+Round 1: exec → 失败 → LLM 分析错误 → write 修复代码
+Round 2: exec → 又失败 → LLM 再分析 → 再 write
+Round 3: exec → 成功！→ 返回结果
+```
+
+```bash
+curl -X POST http://127.0.0.1:3429/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ccrg_code","arguments":{"task_type":"loop","task":"编写 Python 脚本验证数据完整性","commands":["python validate.py"],"files":["src/validate.py"],"max_rounds":3}}}'
+```
 
 ### 多步骤编程示例
 

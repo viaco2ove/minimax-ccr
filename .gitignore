@@ -5,3 +5,9 @@ __pycache__/
 logs/
 .idea/
 /.mmx.env
+/sse_events.txt
+/sse_lines.txt
+/sse_log.txt
+/sse_post.txt
+/sse_result.txt
+/sse_test_out.txt

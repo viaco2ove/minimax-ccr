@@ -4,5 +4,7 @@
   "TRANSLATOR_CONVERTER": false,
   "SSE_CLIENT": false,
   "LLM_SPLITTER_DEBUG": false,
-  "LLM_SPLITTER_CURL": false
+  "LLM_SPLITTER_CURL": false,
+  "MCP_PING_LOG": false,
+  "MCP_CHUNK_LOG": false
 }

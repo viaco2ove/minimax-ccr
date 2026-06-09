@@ -17,9 +17,11 @@ CCRG MCP Server — 给 qoder IDE 等 MCP 客户端提供调用 CCRG 的能力�
 
 import json
 import sys
+import os
 import logging
 import asyncio
 import uuid
+from pathlib import Path
 from typing import Any, Callable
 
 import httpx
@@ -27,6 +29,21 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 
 logger = logging.getLogger("ccrg.mcp")
+
+
+def _load_log_config() -> dict:
+    """加载 log_config.json"""
+    config_path = Path(__file__).parent.parent.parent.parent / "log_config.json"
+    if config_path.exists():
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+_log_config = _load_log_config()
 
 
 # ─── MCP 工具定义 ───────────────────────────────────────────────
@@ -123,14 +140,14 @@ MCP_TOOLS = [
     },
     {
         "name": "ccrg_code",
-        "description": "复杂编程工具 — 通过 CCRG LLM 执行多步骤编程任务（读文件、写代码、执行命令、分析需求）。支持 task_type 切换不同编程动作。",
+        "description": "编程 Agent 工具 — 服务端执行文件读写和命令，LLM 负责思考和生成代码。支持 read/write/exec/loop/plan/review/chat。",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "task_type": {
                     "type": "string",
-                    "enum": ["read", "write", "exec", "plan", "review", "chat"],
-                    "description": "任务类型：read=读取文件，write=写入/修改文件，exec=执行命令，plan=规划任务，review=审查代码，chat=普通对话"
+                    "enum": ["read", "write", "exec", "loop", "plan", "review", "chat"],
+                    "description": "read=读文件让LLM分析, write=LLM生成代码自动写入文件, exec=执行命令LLM分析结果, loop=自动循环修复直到成功, plan=规划任务, review=审查代码, chat=对话"
                 },
                 "task": {
                     "type": "string",
@@ -170,6 +187,16 @@ MCP_TOOLS = [
                     "type": "string",
                     "description": "指定模型（留空自动路由）",
                     "default": ""
+                },
+                "max_rounds": {
+                    "type": "integer",
+                    "description": "loop 模式最大轮数",
+                    "default": 500
+                },
+                "stream": {
+                    "type": "boolean",
+                    "description": "是否通过 SSE 流式返回每一步结果（默认 true）；false 则等待全部完成后再返回",
+                    "default": True
                 }
             },
             "required": ["task_type", "task"]
@@ -297,9 +324,19 @@ async def _handle_ccrg_health(args: dict, base_url: str) -> dict:
 
 
 async def _handle_ccrg_code(args: dict, base_url: str) -> dict:
-    """复杂编程工具 — 通过 LLM 执行多步骤编程任务"""
+    """复杂编程工具 — 服务端执行文件读写/命令 + LLM 思考
+
+    工作方式：
+    - read:  服务端读文件 → 内容发给 LLM 分析 → 返回分析结果
+    - write: 内容发给 LLM → LLM 输出修改建议 → 服务端写入文件
+    - exec:  服务端执行命令 → stdout/stderr 发给 LLM 分析 → 返回分析+结果
+    - loop:  exec→分析→write→exec 循环直到成功或达到 max_rounds
+    - plan:  项目结构发给 LLM → 返回实现计划
+    - review:文件内容发给 LLM → 返回审查建议
+    """
     import os
     import subprocess
+    import re as _re
 
     task_type = args.get("task_type", "chat")
     task = args.get("task", "")
@@ -308,163 +345,427 @@ async def _handle_ccrg_code(args: dict, base_url: str) -> dict:
     commands = args.get("commands", [])
     context = args.get("context", "")
     model = args.get("model", "")
+    max_rounds = args.get("max_rounds", 500)
+    stream = args.get("stream", True)
 
-    # 根据 task_type 构建 LLM prompt
     if task_type == "read":
-        # 读取文件内容
-        file_data = {}
+        return await _code_read(task, files, context, base_url, model, stream)
+
+    elif task_type == "write":
+        return await _code_write(task, files, file_contents, context, base_url, model, stream)
+
+    elif task_type == "exec":
+        return await _code_exec(task, commands, context, base_url, model, stream)
+
+    elif task_type == "loop":
+        return await _code_loop(task, commands, files, context, base_url, model, max_rounds, _emit_sse if stream else None)
+
+    elif task_type == "plan":
+        return await _code_plan(task, files, context, base_url, model, stream)
+
+    elif task_type == "review":
+        return await _code_review(task, files, file_contents, context, base_url, model, stream)
+
+    else:
+        system_prompt = "你是一个高级编程助手。"
+        user_msg = f"{context}\n\n{task}" if context else task
+        return await _call_llm(base_url, system_prompt, user_msg, model)
+
+
+# ─── read: 读文件 → LLM 分析 ──────────────────────────────────
+
+async def _code_read(task: str, files: list, context: str, base_url: str, model: str, stream: bool = True) -> dict:
+    import os
+    file_data = {}
+    for fp in files:
+        try:
+            abs_path = os.path.abspath(fp)
+            with open(abs_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            file_data[fp] = content
+            logger.info(f"[ccrg_code:read] read {fp} ({len(content)} chars)")
+        except Exception as e:
+            file_data[fp] = f"ERROR: {e}"
+            logger.warning(f"[ccrg_code:read] failed to read {fp}: {e}")
+
+    system_prompt = (
+        "你是一个高级编程助手。用户提供了项目文件内容，请仔细分析并回答问题。\n"
+        "回答要具体，引用文件中的行号和代码片段。"
+    )
+    user_msg = f"## 任务\n{task}\n\n"
+    if context:
+        user_msg += f"## 额外上下文\n{context}\n\n"
+    user_msg += "## 项目文件\n"
+    for fp, content in file_data.items():
+        user_msg += f"\n### {fp}\n```\n{content[:15000]}\n```\n"
+
+    if stream:
+        result = await _call_llm_stream(base_url, system_prompt, user_msg, model, _emit_sse)
+        result["files_read"] = list(file_data.keys())
+        return result
+    else:
+        result = await _call_llm(base_url, system_prompt, user_msg, model)
+        result["files_read"] = list(file_data.keys())
+        return result
+
+
+# ─── write: LLM 生成代码 → 服务端写入文件 ──────────────────────
+
+async def _code_write(task: str, files: list, file_contents: list, context: str, base_url: str, model: str, stream: bool = True) -> dict:
+    import os
+
+    system_prompt = (
+        "你是一个高级编程助手。请根据任务修改代码文件。\n\n"
+        "输出格式要求：\n"
+        "请输出一个 JSON 数组，每个元素包含 path 和 content 字段。\n"
+        "```json\n[{\"path\": \"file.py\", \"content\": \"完整文件内容...\"}]\n```\n"
+        "只输出 JSON，不要其他内容。确保每个文件输出完整内容（不是 diff）。"
+    )
+
+    user_msg = f"## 任务\n{task}\n\n"
+    if context:
+        user_msg += f"## 额外上下文\n{context}\n\n"
+    if file_contents:
+        user_msg += "## 要修改的文件\n"
+        for fc in file_contents:
+            user_msg += f"\n### {fc['path']}\n```\n{fc['content'][:15000]}\n```\n"
+    elif files:
         for fp in files:
             try:
                 abs_path = os.path.abspath(fp)
                 with open(abs_path, "r", encoding="utf-8") as f:
-                    file_data[fp] = f.read()
-            except Exception as e:
-                file_data[fp] = f"ERROR: {e}"
+                    content = f.read()
+                user_msg += f"\n### {fp}\n```\n{content[:15000]}\n```\n"
+            except Exception:
+                pass
 
-        # 让 LLM 分析文件内容
-        system_prompt = "你是一个高级编程助手。用户提供了项目文件，请分析并回答问题。"
-        user_msg = f"## 任务\n{task}\n\n"
-        if context:
-            user_msg += f"## 额外上下文\n{context}\n\n"
-        user_msg += "## 项目文件\n"
-        for fp, content in file_data.items():
-            user_msg += f"\n### {fp}\n```\n{content[:5000]}\n```\n"
-
-        return await _call_llm(base_url, system_prompt, user_msg, model)
-
-    elif task_type == "write":
-        # 让 LLM 生成/修改代码
-        system_prompt = "你是一个高级编程助手。请根据任务生成完整的代码。输出格式为 JSON 数组，每个元素包含 path 和 content 字段。只输出 JSON，不要其他内容。"
-        user_msg = f"## 任务\n{task}\n\n"
-        if context:
-            user_msg += f"## 额外上下文\n{context}\n\n"
-        if file_contents:
-            user_msg += "## 现有文件\n"
-            for fc in file_contents:
-                user_msg += f"\n### {fc['path']}\n```\n{fc['content'][:5000]}\n```\n"
-        elif files:
-            # 自动读取文件
-            for fp in files:
-                try:
-                    abs_path = os.path.abspath(fp)
-                    with open(abs_path, "r", encoding="utf-8") as f:
-                        content = f.read()
-                    user_msg += f"\n### {fp}\n```\n{content[:5000]}\n```\n"
-                except Exception:
-                    pass
-
+    if stream:
+        result = await _call_llm_stream(base_url, system_prompt, user_msg, model, _emit_sse)
+    else:
         result = await _call_llm(base_url, system_prompt, user_msg, model)
 
-        # 尝试解析 LLM 输出并写入文件
-        if "text" in result:
-            written_files = []
-            try:
-                import json as _json
-                # 提取 JSON 部分
-                text = result["text"]
+    # 解析 LLM 输出，写入文件
+    if "text" in result:
+        written_files = []
+        try:
+            text = result["text"]
+            # 提取 JSON 数组（兼容 markdown 代码块包裹）
+            json_match = _re.search(r'```(?:json)?\s*\n?(\[[\s\S]*?\])\s*\n?```', text)
+            if json_match:
+                code_blocks = json.loads(json_match.group(1))
+            else:
                 start = text.find("[")
                 end = text.rfind("]") + 1
-                if start >= 0 and end > start:
-                    code_blocks = _json.loads(text[start:end])
-                    for block in code_blocks:
-                        fp = block.get("path", "")
-                        content = block.get("content", "")
-                        if fp and content:
-                            abs_path = os.path.abspath(fp)
-                            os.makedirs(os.path.dirname(abs_path), exist_ok=True)
-                            with open(abs_path, "w", encoding="utf-8") as f:
-                                f.write(content)
-                            written_files.append(fp)
-                    result["written_files"] = written_files
-            except Exception as e:
-                result["write_error"] = str(e)
+                code_blocks = json.loads(text[start:end])
 
-        return result
+            for block in code_blocks:
+                fp = block.get("path", "")
+                content = block.get("content", "")
+                if fp and content:
+                    abs_path = os.path.abspath(fp)
+                    os.makedirs(os.path.dirname(abs_path) or ".", exist_ok=True)
+                    with open(abs_path, "w", encoding="utf-8") as f:
+                        f.write(content)
+                    written_files.append(fp)
+                    logger.info(f"[ccrg_code:write] wrote {fp} ({len(content)} chars)")
+            result["written_files"] = written_files
+        except json.JSONDecodeError as e:
+            result["write_error"] = f"Failed to parse LLM output as JSON: {e}"
+            logger.error(f"[ccrg_code:write] JSON parse error: {e}")
+        except Exception as e:
+            result["write_error"] = str(e)
+            logger.error(f"[ccrg_code:write] error: {e}")
 
-    elif task_type == "exec":
-        # 执行命令并让 LLM 分析结果
-        results = {}
+    return result
+
+
+# ─── exec: 执行命令 → LLM 分析结果 ────────────────────────────
+
+async def _code_exec(task: str, commands: list, context: str, base_url: str, model: str, stream: bool = True) -> dict:
+    import subprocess
+
+    results = {}
+    for cmd in commands:
+        try:
+            logger.info(f"[ccrg_code:exec] running: {cmd}")
+            proc = subprocess.run(
+                cmd, shell=True, capture_output=True, text=True,
+                timeout=120, encoding="utf-8", errors="replace"
+            )
+            results[cmd] = {
+                "stdout": proc.stdout[:10000],
+                "stderr": proc.stderr[:5000],
+                "returncode": proc.returncode
+            }
+            logger.info(f"[ccrg_code:exec] {cmd} → exit={proc.returncode}, stdout={len(proc.stdout)} chars")
+        except subprocess.TimeoutExpired:
+            results[cmd] = {"error": "timeout (120s)"}
+            logger.warning(f"[ccrg_code:exec] {cmd} → timeout")
+        except Exception as e:
+            results[cmd] = {"error": str(e)}
+            logger.warning(f"[ccrg_code:exec] {cmd} → error: {e}")
+
+    # 让 LLM 分析执行结果
+    system_prompt = (
+        "你是一个高级编程助手。用户执行了命令，请分析执行结果。\n"
+        "如果命令失败，分析错误原因并给出修复建议。\n"
+        "如果命令成功，确认结果是否符合预期。"
+    )
+    user_msg = f"## 任务\n{task}\n\n"
+    if context:
+        user_msg += f"## 额外上下文\n{context}\n\n"
+    user_msg += "## 命令执行结果\n"
+    for cmd, res in results.items():
+        user_msg += f"\n### `{cmd}`\n"
+        if "error" in res:
+            user_msg += f"错误: {res['error']}\n"
+        else:
+            user_msg += f"退出码: {res['returncode']}\n"
+            if res["stdout"]:
+                user_msg += f"stdout:\n```\n{res['stdout'][:3000]}\n```\n"
+            if res["stderr"]:
+                user_msg += f"stderr:\n```\n{res['stderr'][:2000]}\n```\n"
+
+    if stream:
+        analysis = await _call_llm_stream(base_url, system_prompt, user_msg, model, _emit_sse)
+    else:
+        analysis = await _call_llm(base_url, system_prompt, user_msg, model)
+    analysis["command_results"] = results
+
+    # 判断是否有失败
+    has_failure = any(
+        (r.get("returncode", 0) != 0 if "returncode" in r else True)
+        for r in results.values()
+    )
+    analysis["has_failure"] = has_failure
+    return analysis
+
+
+# ─── loop: 流式循环（SSE 实时推送每一步）─────────────
+
+async def _code_loop(task: str, commands: list, files: list, context: str,
+                    base_url: str, model: str, max_rounds: int = 500,
+                    _emit: callable = None) -> dict:
+    """
+    流式自动修复循环：exec → 分析 → write → exec ...
+    每一步通过 SSE 实时推送，qoder 实时看到进度。
+
+    Args:
+        _emit: SSE 推送回调，_emit({"type": "step", "text": "...", "done": False})
+    """
+    import subprocess
+    import re as _re
+
+    accumulated_context = context or ""
+    all_steps = []
+
+    def emit(text: str, done: bool = False):
+        if _emit:
+            _emit({"type": "step", "text": text, "done": done})
+        all_steps.append(text)
+
+    for round_num in range(1, max_rounds + 1):
+        round_header = f"## 🔄 Round {round_num}/{max_rounds}"
+        emit(round_header)
+
+        # ── Step 1: 执行命令 ──────────────────────────────────
+        emit(f"\n**Step 1: 执行命令**\n")
+        exec_results = {}
+        all_success = True
         for cmd in commands:
             try:
                 proc = subprocess.run(
                     cmd, shell=True, capture_output=True, text=True,
-                    timeout=30, encoding="utf-8", errors="replace"
+                    timeout=120, encoding="utf-8", errors="replace"
                 )
-                results[cmd] = {
-                    "stdout": proc.stdout[:5000],
-                    "stderr": proc.stderr[:2000],
+                exec_results[cmd] = {
+                    "stdout": proc.stdout[:10000],
+                    "stderr": proc.stderr[:5000],
                     "returncode": proc.returncode
                 }
-            except subprocess.TimeoutExpired:
-                results[cmd] = {"error": "timeout (30s)"}
+                if proc.returncode != 0:
+                    all_success = False
             except Exception as e:
-                results[cmd] = {"error": str(e)}
+                exec_results[cmd] = {"error": str(e)}
+                all_success = False
 
-        # 让 LLM 分析执行结果
-        system_prompt = "你是一个高级编程助手。用户执行了一些命令，请分析结果并给出建议。"
-        user_msg = f"## 任务\n{task}\n\n"
-        if context:
-            user_msg += f"## 额外上下文\n{context}\n\n"
-        user_msg += "## 命令执行结果\n"
-        for cmd, res in results.items():
-            user_msg += f"\n### `{cmd}`\n"
-            if "error" in res:
-                user_msg += f"错误: {res['error']}\n"
-            else:
-                user_msg += f"退出码: {res['returncode']}\n"
-                if res["stdout"]:
-                    user_msg += f"stdout:\n```\n{res['stdout'][:2000]}\n```\n"
-                if res["stderr"]:
-                    user_msg += f"stderr:\n```\n{res['stderr'][:1000]}\n```\n"
+        for cmd, res in exec_results.items():
+            rc = res.get("returncode", "?")
+            status = "✅ 成功" if rc == 0 else f"❌ 失败 (退出码: {rc})"
+            emit(f"`{cmd}` → {status}")
+            err = res.get("stderr", "") or res.get("error", "")
+            if err:
+                emit(f"```\n{err[:1500]}\n```")
 
-        analysis = await _call_llm(base_url, system_prompt, user_msg, model)
-        analysis["command_results"] = results
-        return analysis
+        # ── Step 2: 成功则返回 ────────────────────────────────
+        if all_success:
+            emit(f"\n**任务完成！**")
+            system_prompt = "任务已完成。请简要总结执行结果。"
+            user_msg = f"## 任务\n{task}\n\n## 执行结果\n"
+            for cmd, res in exec_results.items():
+                user_msg += f"`{cmd}` → 退出码: {res.get('returncode', '?')}\n"
+                if res.get("stdout"):
+                    user_msg += f"```\n{res['stdout'][:1000]}\n```\n"
+            result = await _call_llm_stream(base_url, system_prompt, user_msg, model, emit)
+            emit(f"\n**LLM 总结:**\n{result.get('text', '')[:2000]}")
+            emit("", done=True)
+            return {"success": True, "text": "\n".join(all_steps)}
 
-    elif task_type == "plan":
-        # 规划任务
+        # ── Step 3: 读取文件 ─────────────────────────────────
+        emit(f"\n**Step 2: 读取相关文件**\n")
+        file_context = ""
+        for fp in files:
+            try:
+                abs_path = os.path.abspath(fp)
+                with open(abs_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                    file_context += f"\n### {fp}\n```\n{content[:15000]}\n```\n"
+                emit(f"- `{fp}` ({len(content)} chars)")
+            except Exception as e:
+                emit(f"- `{fp}` (读取失败: {e})")
+
+        # ── Step 4: LLM 流式分析 + 生成修复 ────────────────
+        emit(f"\n**Step 3: 分析错误 & 生成修复代码**\n")
         system_prompt = (
-            "你是一个高级编程架构师。请根据用户需求制定详细的实现计划。\n"
-            "输出格式：\n"
-            "1. 需求分析\n"
-            "2. 技术方案（包括要修改/新建的文件）\n"
-            "3. 实现步骤（每步具体操作）\n"
-            "4. 测试验证\n"
-            "请用中文回答，步骤要具体可执行。"
+            "你是一个高级编程助手。程序执行失败了，请分析错误并输出修复后的完整文件代码。\n\n"
+            "输出格式：一个 JSON 数组，每个元素包含 path 和 content 字段。\n"
+            "```json\n[{\"path\": \"file.py\", \"content\": \"完整修复后的文件内容...\"}]\n```\n"
+            "只输出 JSON，不要其他内容。"
         )
-        user_msg = f"## 任务\n{task}\n\n"
-        if context:
-            user_msg += f"## 额外上下文\n{context}\n\n"
-        if files:
-            user_msg += "## 相关文件\n" + "\n".join(f"- `{f}`" for f in files) + "\n"
-        user_msg += "\n请制定详细的实现计划。"
-        return await _call_llm(base_url, system_prompt, user_msg, model)
+        user_msg = f"## 任务\n{task}\n\n## 执行失败\n"
+        user_msg += "\n".join([res.get("stderr", "") or res.get("error", "") for res in exec_results.values()])
+        if file_context:
+            user_msg += f"\n\n## 相关文件内容\n{file_context}"
+        if accumulated_context:
+            user_msg += f"\n\n## 历史上下文\n{accumulated_context}"
 
-    elif task_type == "review":
-        # 审查代码
-        system_prompt = "你是一个高级代码审查专家。请审查代码并给出改进建议。关注：正确性、安全性、性能、可维护性。"
-        user_msg = f"## 审查任务\n{task}\n\n"
-        if context:
-            user_msg += f"## 额外上下文\n{context}\n\n"
-        for fc in file_contents:
-            user_msg += f"\n### {fc['path']}\n```\n{fc['content'][:8000]}\n```\n"
-        if not file_contents and files:
-            for fp in files:
+        fix_result = await _call_llm_stream(base_url, system_prompt, user_msg, model, emit)
+        emit(f"\n**LLM 分析:**\n{fix_result.get('text', '')[:3000]}")
+
+        # ── Step 5: 写入修复文件 ────────────────────────────
+        emit(f"\n**Step 4: 写入修复文件**\n")
+        if "text" in fix_result:
+            try:
+                text = fix_result["text"]
+                json_match = _re.search(r'```(?:json)?\s*\n?(\[[\s\S]*?\])\s*\n?```', text)
+                if json_match:
+                    code_blocks = json.loads(json_match.group(1))
+                else:
+                    start = text.find("[")
+                    end = text.rfind("]") + 1
+                    code_blocks = json.loads(text[start:end])
+
+                import os as _os
+                for block in code_blocks:
+                    fp = block.get("path", "")
+                    content = block.get("content", "")
+                    if fp and content:
+                        abs_path = _os.path.abspath(fp)
+                        _os.makedirs(_os.path.dirname(abs_path) or ".", exist_ok=True)
+                        with open(abs_path, "w", encoding="utf-8") as f:
+                            f.write(content)
+                        emit(f"- ✅ 已写入: `{fp}` ({len(content)} chars)")
+                        logger.info(f"[ccrg_code:loop] wrote {fp}")
+            except Exception as e:
+                emit(f"- ❌ 写入失败: {e}")
+                logger.error(f"[ccrg_code:loop] write error: {e}")
+
+        accumulated_context += f"\n\n### Round {round_num}\n" + "\n".join(all_steps[-20:])
+
+    emit(f"\n⚠️ 达到最大轮数 ({max_rounds})，停止", done=True)
+    return {"success": False, "text": "\n".join(all_steps)}
+
+
+# ─── 流式 LLM 调用 ──────────────────────────────────────────────
+
+async def _call_llm_stream(base_url: str, system: str, user_msg: str,
+                           model: str = "", emit: callable = None) -> dict:
+    """流式调用 LLM，每个 token 都通过 SSE 推送"""
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user_msg}
+    ]
+    body: dict[str, Any] = {"messages": messages, "stream": True}
+    if model:
+        body["model"] = model
+
+    full_text = ""
+    async with httpx.AsyncClient(timeout=180) as client:
+        async with client.stream(
+            "POST", f"{base_url}/v1/chat/completions",
+            json=body, headers={"Content-Type": "application/json"}
+        ) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                line = line.strip()
+                if not line or line == "data: [DONE]":
+                    continue
+                if line.startswith("data: "):
+                    line = line[6:]
                 try:
-                    abs_path = os.path.abspath(fp)
-                    with open(abs_path, "r", encoding="utf-8") as f:
-                        content = f.read()
-                    user_msg += f"\n### {fp}\n```\n{content[:8000]}\n```\n"
+                    chunk = json.loads(line)
                 except Exception:
-                    pass
+                    continue
+                delta = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                if delta:
+                    full_text += delta
+                    if emit:
+                        emit(delta, done=False)
+
+    if emit:
+        emit("\n", done=False)
+    return {"text": full_text, "model": body.get("model", "")}
+
+
+# ─── plan: 规划任务 ───────────────────────────────────────────
+
+async def _code_plan(task: str, files: list, context: str, base_url: str, model: str, stream: bool = True) -> dict:
+    system_prompt = (
+        "你是一个高级编程架构师。请根据用户需求制定详细的实现计划。\n"
+        "输出格式：\n"
+        "1. 需求分析\n"
+        "2. 技术方案（包括要修改/新建的文件）\n"
+        "3. 实现步骤（每步具体操作）\n"
+        "4. 测试验证\n"
+        "请用中文回答，步骤要具体可执行。"
+    )
+    user_msg = f"## 任务\n{task}\n\n"
+    if context:
+        user_msg += f"## 额外上下文\n{context}\n\n"
+    if files:
+        user_msg += "## 相关文件\n" + "\n".join(f"- `{f}`" for f in files) + "\n"
+    user_msg += "\n请制定详细的实现计划。"
+    if stream:
+        return await _call_llm_stream(base_url, system_prompt, user_msg, model, _emit_sse)
+    else:
         return await _call_llm(base_url, system_prompt, user_msg, model)
 
+
+# ─── review: 审查代码 ─────────────────────────────────────────
+
+async def _code_review(task: str, files: list, file_contents: list, context: str, base_url: str, model: str, stream: bool = True) -> dict:
+    system_prompt = (
+        "你是一个高级代码审查专家。请审查代码并给出改进建议。\n"
+        "关注：正确性、安全性、性能、可维护性。\n"
+        "按严重程度排序：P0（阻断）→ P1（重要）→ P2（建议）。"
+    )
+    user_msg = f"## 审查任务\n{task}\n\n"
+    if context:
+        user_msg += f"## 额外上下文\n{context}\n\n"
+    for fc in file_contents:
+        user_msg += f"\n### {fc['path']}\n```\n{fc['content'][:15000]}\n```\n"
+    if not file_contents and files:
+        for fp in files:
+            try:
+                abs_path = os.path.abspath(fp)
+                with open(abs_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                user_msg += f"\n### {fp}\n```\n{content[:15000]}\n```\n"
+            except Exception:
+                pass
+    if stream:
+        return await _call_llm_stream(base_url, system_prompt, user_msg, model, _emit_sse)
     else:
-        # chat — 普通对话
-        system_prompt = "你是一个高级编程助手。"
-        user_msg = task
-        if context:
-            user_msg = f"{context}\n\n{task}"
         return await _call_llm(base_url, system_prompt, user_msg, model)
 
 
@@ -555,6 +856,19 @@ async def handle_jsonrpc(request: dict, base_url: str) -> dict | None:
 
 _sse_sessions: dict[str, asyncio.Queue] = {}
 
+# 用于在 handler 调用链中传递当前 session 的 SSE 队列（避免改函数签名）
+_current_session_queue: asyncio.Queue | None = None
+
+
+def _emit_sse(event: dict):
+    """向当前 SSE 会话推送一个事件（由 _code_loop 等调用）"""
+    global _current_session_queue
+    if _current_session_queue:
+        try:
+            _current_session_queue.put_nowait(event)
+        except Exception:
+            pass
+
 
 # ─── 注册路由（集成到 CCRG 主服务）───────────────────────────────
 
@@ -606,20 +920,80 @@ def register_routes(app: FastAPI, base_url_provider: Callable[[], str]):
     @app.post("/mcp/messages")
     async def mcp_messages(request: Request, sessionId: str = ""):
         """MCP SSE 消息端点"""
+        global _current_session_queue
+
         body = await request.json()
         method = body.get("method", "")
-        logger.info(f"[MCP-SSE] method={method}, id={body.get('id')}, session={sessionId[:8]}...")
+        req_id = body.get("id")
+
+        if method == "ping":
+            if _log_config.get("MCP_PING_LOG", False):
+                logger.info(f"[MCP-SSE] method=ping, id={req_id}, session={sessionId[:8]}...")
+            return JSONResponse(content={"jsonrpc": "2.0", "id": req_id, "result": {}})
+
         if method == "tools/call":
             tool_name = body.get("params", {}).get("name", "")
             tool_args = body.get("params", {}).get("arguments", {})
-            logger.info(f"[MCP-SSE] tool_call: {tool_name} args={json.dumps(tool_args, ensure_ascii=False)[:200]}")
-        response = await handle_jsonrpc(body, base_url_provider())
+            task_type = tool_args.get("task_type", "")
+            is_loop = (tool_name == "ccrg_code" and task_type == "loop")
 
-        if sessionId and sessionId in _sse_sessions:
-            if response is not None:
-                await _sse_sessions[sessionId].put(response)
-            return JSONResponse(content={"status": "accepted"})
+            logger.info(f"[MCP-SSE] method={method}, id={req_id}, tool={tool_name}, session={sessionId[:8]}...")
+            logger.info(f"[MCP-SSE] tool_call: {tool_name} args={json.dumps(tool_args, ensure_ascii=False)[:200]}")
+
+            # 所有 ccrg_code 工具都支持流式：设置 SSE 队列
+            should_stream = tool_args.get("stream", True)
+            if should_stream and tool_name == "ccrg_code" and sessionId and sessionId in _sse_sessions:
+                _current_session_queue = _sse_sessions[sessionId]
+                logger.info(f"[MCP-SSE] stream=true: SSE queue set for session {sessionId[:8]}...")
+                try:
+                    response = await handle_jsonrpc(body, base_url_provider())
+                finally:
+                    _current_session_queue = None
+                return JSONResponse(content={"status": "accepted"})
+            elif should_stream and tool_name == "ccrg_code":
+                # 无 session 时，直接返回 SSE 流
+                logger.info(f"[MCP-SSE] stream=true: inline SSE (no session)")
+
+                async def sse_stream():
+                    global _current_session_queue
+                    q: asyncio.Queue = asyncio.Queue()
+                    _current_session_queue = q
+
+                    async def run():
+                        try:
+                            await handle_jsonrpc(body, base_url_provider())
+                        finally:
+                            q.put_nowait(None)  # 结束信号
+
+                    t = asyncio.create_task(run())
+                    while True:
+                        item = await q.get()
+                        if item is None:
+                            break
+                        yield f"event: message\ndata: {json.dumps(item, ensure_ascii=False)}\n\n"
+                    await t
+                    _current_session_queue = None
+
+                return StreamingResponse(sse_stream(), media_type="text/event-stream")
+            else:
+                _current_session_queue = None
+                try:
+                    response = await handle_jsonrpc(body, base_url_provider())
+                finally:
+                    _current_session_queue = None
+                if response is not None:
+                    if sessionId and sessionId in _sse_sessions:
+                        await _sse_sessions[sessionId].put(response)
+                        return JSONResponse(content={"status": "accepted"})
+                    return JSONResponse(content=response)
+                return JSONResponse(content={})
         else:
+            logger.info(f"[MCP-SSE] method={method}, id={req_id}, session={sessionId[:8]}...")
+            response = await handle_jsonrpc(body, base_url_provider())
+            if sessionId and sessionId in _sse_sessions:
+                if response is not None:
+                    await _sse_sessions[sessionId].put(response)
+                return JSONResponse(content={"status": "accepted"})
             return JSONResponse(content=response or {})
 
     logger.info("MCP routes registered: POST /mcp, GET /mcp/sse, POST /mcp/messages")

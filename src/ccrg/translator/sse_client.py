@@ -8,12 +8,29 @@ SSE Client - 负责与 CCRG 交互，获取流式响应。
 sse_client <-> openai_translator <-> CCRG
 """
 
+import json
 import logging
+from pathlib import Path
 from typing import AsyncGenerator
 
 from .openai_translator import AnthropicToOpenAISSEConverter
 
 logger = logging.getLogger("ccrg")
+
+
+def _load_log_config() -> dict:
+    """加载 log_config.json"""
+    config_path = Path(__file__).parent.parent.parent / "log_config.json"
+    if config_path.exists():
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+_log_config = _load_log_config()
 
 
 class FakeRequest:
@@ -57,10 +74,12 @@ async def collect_request(ccrg_handle_request, transformed_body: dict) -> tuple[
     logger.debug(f"[SSE_CLIENT] CCRG returned: {type(resp).__name__}")
 
     chunks = []
+    chunk_log = _log_config.get("SSE_CLIENT_CHUNK_LOG", _log_config.get("SSE_CLIENT", False))
     try:
         async for chunk in resp.body_iterator:
             chunks.append(chunk)
-            logger.debug(f"[SSE_CLIENT] collected chunk: {len(chunk)} bytes")
+            if chunk_log:
+                logger.debug(f"[SSE_CLIENT] collected chunk: {len(chunk)} bytes")
     except Exception as e:
         logger.error(f"[SSE_CLIENT] Error collecting chunks: {e}")
 

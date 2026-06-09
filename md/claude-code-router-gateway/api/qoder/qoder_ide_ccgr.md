@@ -26,6 +26,7 @@ https://api3.qoder.sh:443
 
 在 Qoder IDE 的 MCP 配置文件中添加 CCRG 网关：
 ![alt text](image.png)
+![img.png](img.png)
 菜单操作：文件>首选项>Qoder 设置面板 中配置 mcp 服务器
 文件地址是：
 Users > viaco > AppData > Roaming > Qoder > SharedClientCache >mcp.json
@@ -149,10 +150,38 @@ qoder 中：
 @ccrg_code  根据script/kettle/business_job/J03_business_online_consult_job/J03_chat_group_job.kjb 编写 script/data_check 和script/kettle/data_check_job 
 效果: 效果不佳！qoder 自己解决问题不走mcp
 
+curl --location 'http://127.0.0.1:3429/mcp/sse'
+
+```
+curl --location 'http://127.0.0.1:3429/mcp/messages?sessionId=xxx' \
+--header 'Content-Type: application/json' \
+--data '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+        "name": "ccrg_code",
+        "arguments": {
+            "task_type": "loop",
+            "task": "测试",
+            "commands": [
+                "echo hello"
+            ],
+            "max_rounds": 1,
+            "stream": true,
+        }
+    }
+}'
+```
+
 ## 增加skill：ccrg-code 
+![img_1.png](img_1.png)
+使用前需要自行查看一下mcp 服务可用性
+
 C:\Users\xxx\.qoder\skills\ccrg-code\SKILL.md
-[SKILL.md](SKILL.md)
-qoder 中： /ccrg-code {问题内容}
+[skill](skill)
+qoder 中： /ccrg-code  务必调用技能！！！ {问题内容}
+qoder 中： 使用ccrg-code 技能：  {问题内容}
 效果: 效果还行，
 
 ## 参考文档
