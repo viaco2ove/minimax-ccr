@@ -73,7 +73,7 @@ class SemanticSplitterLocal(Splitter):
         for category in categories:
             # 如果是 problem_analyze 并且为空，就用 intention_analyze 顶替
             if category == "problem_analyze" and not kw_list:
-                kw_list = wflow.get("intention_analyze", [])
+                kw_list = wflow.get("analyze_plan", [])
 
             # 如果还是空，就跳过当前分类
             if not kw_list:
