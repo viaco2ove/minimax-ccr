@@ -49,8 +49,6 @@ class SemanticSplitterLocal(Splitter):
         # 遍历所有关键词，计算相似度，找出命中的关键词
         matched = self._match_keywords(model, user_emb)
 
-        logger.debug(f"[SemanticSplitterLocal] matched Arr: {matched}")
-
         # 根据命中关键词解析路由
         route_str, fb, intent = self._resolve_route_from_keywords(matched)
 
@@ -91,11 +89,15 @@ class SemanticSplitterLocal(Splitter):
             # 按相似度降序排序，取最高分
             scores.sort(key=lambda x: x[1], reverse=True)
 
-            # 只取相似度最高且超过阈值的关键词（最多 3 个）
-            top_kws = [kw for kw, score in scores[:3] if score >= self.threshold]
+            # 只取相似度最高且超过阈值的关键词（最多 3 个），保留分数
+            top_kws = [(kw, round(score, 3)) for kw, score in scores[:3] if score >= self.threshold]
 
             if top_kws:
                 result[category] = top_kws
+
+        # 打印带分数的命中结果
+        log_items = [f"{cat}:{kws}" for cat, kws in result.items()]
+        logger.debug(f"[SemanticSplitterLocal] matched Arr: {{{', '.join(log_items)}}}")
 
         return result
 
@@ -103,10 +105,11 @@ class SemanticSplitterLocal(Splitter):
         """根据命中关键词从 keyword_routing.rules 找路由，和 llm_splitter 逻辑一致"""
         rules = self.config.get("routing", {}).get("keyword_routing", {}).get("rules", [])
 
-        # 合并所有命中的关键词
+        # 合并所有命中的关键词（每个条目可能是 str 或 (str, float) 元组）
         all_matched_kws = []
         for kws in matched.values():
-            all_matched_kws.extend(kws)
+            for item in kws:
+                all_matched_kws.append(item[0] if isinstance(item, tuple) else item)
 
         # 判断意图：task_keywords 命中多则 task，否则 chat
         task_count = len(matched.get("intention_analyze", [])) + len(matched.get("problem_analyze", []))
