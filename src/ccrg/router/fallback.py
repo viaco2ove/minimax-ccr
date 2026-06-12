@@ -97,7 +97,7 @@ class FallbackRouter:
             logger.info(f"[{self.request_id}] Trying {route} for {self.step_name}")
 
             # Debug: 标记即将发送 curl 请求（实际请求体在 call_provider_streaming 中打印）
-            logger.debug(f"[FallbackRouter] [REQ] [CURL] route={route}, step={self.step_name}")
+            logger.debug(f"[FallbackRouter] [REQ] [CURL]7 route={route}, step={self.step_name}")
 
             # Debug: 计算 msgs_tokens 并检查是否超过 provider 的 max_context
             msgs_tokens = _calc_msgs_tokens(msgs)

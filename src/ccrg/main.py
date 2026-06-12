@@ -401,10 +401,19 @@ def _get_auth_header_for_provider(prov_config) -> tuple[str, str]:
 
 
 def _make_curl_cmd(target_url: str, req_file_path: str, prov_config) -> str:
-    """生成 curl 命令字符串"""
+    """生成 curl 命令字符串（密钥脱敏，保留 Bearer 等前缀）"""
     auth_name, auth_value = _get_auth_header_for_provider(prov_config)
-    # 隐藏真实 key
-    auth_display = auth_value.split()[-1] if " " in auth_value else auth_value
+    # 脱敏密钥部分，保留前缀（如 "Bearer "）
+    if " " in auth_value:
+        prefix, key_part = auth_value.rsplit(" ", 1)
+        prefix = prefix + " "
+    else:
+        prefix, key_part = "", auth_value
+    if len(key_part) > 8:
+        masked = f"{key_part[:4]}...{key_part[-4:]}"
+    else:
+        masked = "****"
+    auth_display = f"{prefix}{masked}"
     return (
         f"curl -X POST '{target_url}' \\\n"
         f"  -H 'Content-Type: application/json' \\\n"
@@ -593,7 +602,7 @@ async def _handle_request(request: Request) -> Response:
                                 with open(req_file, "w", encoding="utf-8") as f:
                                     json.dump(req_for_provider, f, ensure_ascii=False)
                                 curl_cmd = _make_curl_cmd(prov_target_url, f"logs/req/{req_file.name}", prov_config)
-                                logger.debug(f"[FallbackRouter] [REQ] [CURL] [{prov_name}] [{model}]: {req_file} (chars={len(json.dumps(req_for_provider, ensure_ascii=False))})\n{curl_cmd}")
+                                logger.debug(f"[FallbackRouter] [REQ] [CURL]1 [{prov_name}] [{model}]: {req_file} (chars={len(json.dumps(req_for_provider, ensure_ascii=False))})\n{curl_cmd}")
 
                             async with httpx.AsyncClient(timeout=prov_timeout) as client:
                                 response = await client.post(prov_target_url, json=req_for_provider, headers=prov_headers)
@@ -790,7 +799,7 @@ async def _handle_streaming_with_fallback(
                             with open(req_file, "w", encoding="utf-8") as f:
                                 json.dump(stripped, f, ensure_ascii=False)
                             curl_cmd = _make_curl_cmd(target_url, f"logs/req/{req_file.name}", prov_config)
-                            logger.debug(f"[FallbackRouter] [REQ] [CURL] [{prov_name}]: {req_file} (chars={len(json.dumps(stripped, ensure_ascii=False))})\n{curl_cmd}")
+                            logger.debug(f"[FallbackRouter] [REQ] [CURL]2 [{prov_name}]: {req_file} (chars={len(json.dumps(stripped, ensure_ascii=False))})\n{curl_cmd}")
                         # 将当前 provider 重新加入队列
                         providers_to_try.insert(provider_index[0], (prov_name, model))
                         # 替换 original_body 为剥离后的版本
@@ -1656,7 +1665,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
             with open(req_file, "w", encoding="utf-8") as f:
                 json.dump(req_for_provider, f, ensure_ascii=False)
             curl_cmd = _make_curl_cmd(prov_target_url, f"logs/req/{req_file.name}", prov_config)
-            logger.debug(f"[FallbackRouter] [REQ] [CURL] [{prov_name}] [{model}]: {req_file} (chars={len(json.dumps(req_for_provider, ensure_ascii=False))})\n{curl_cmd}")
+            logger.debug(f"[FallbackRouter] [REQ] [CURL]4 [{prov_name}] [{model}]: {req_file} (chars={len(json.dumps(req_for_provider, ensure_ascii=False))})\n{curl_cmd}")
 
         try:
             async with httpx.AsyncClient(timeout=prov_timeout) as client:
@@ -1798,7 +1807,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                     with open(req_file, "w", encoding="utf-8") as f:
                         json.dump(req_for_provider, f, ensure_ascii=False)
                     curl_cmd = _make_curl_cmd(prov_target_url, f"logs/req/{req_file.name}", prov_config)
-                    logger.debug(f"[FallbackRouter] [REQ] [CURL] [{prov_name}] [{model}]: {req_file} (chars={len(json.dumps(req_for_provider, ensure_ascii=False))})\n{curl_cmd}")
+                    logger.debug(f"[FallbackRouter] [REQ] [CURL]5 [{prov_name}] [{model}]: {req_file} (chars={len(json.dumps(req_for_provider, ensure_ascii=False))})\n{curl_cmd}")
 
                 logger.warning(f"[{request_id}] {prov_name} streaming 400 request debug: {json.dumps(debug_info, ensure_ascii=False, default=str)}")
 
@@ -1848,7 +1857,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                             with open(req_file, "w", encoding="utf-8") as f:
                                 json.dump(stripped, f, ensure_ascii=False)
                             curl_cmd = _make_curl_cmd(prov_target_url, f"logs/req/{req_file.name}", prov_config)
-                            logger.debug(f"[FallbackRouter] [REQ] [CURL] [{prov_name}]: {req_file} (chars={len(json.dumps(stripped, ensure_ascii=False))})\n{curl_cmd}")
+                            logger.debug(f"[FallbackRouter] [REQ] [CURL]6 [{prov_name}]: {req_file} (chars={len(json.dumps(stripped, ensure_ascii=False))})\n{curl_cmd}")
                         # 更新 local_req_body 用于下次重试
                         local_req_body[0] = stripped
                         # 抛出异常让 FallbackRouter 重试

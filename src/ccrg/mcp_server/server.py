@@ -922,7 +922,21 @@ def register_routes(app: FastAPI, base_url_provider: Callable[[], str]):
         """MCP SSE 消息端点"""
         global _current_session_queue
 
-        body = await request.json()
+        # 宽松 JSON 解析：允许 trailing comma
+        raw_body = await request.body()
+        try:
+            body = json.loads(raw_body)
+        except json.JSONDecodeError as e:
+            if "trailing comma" in str(e) or "Extra data" in str(e):
+                # 移除 trailing comma 后重试
+                import re
+                fixed = re.sub(r',(\s*[}\]])', r'\1', raw_body.decode('utf-8', errors='replace'))
+                try:
+                    body = json.loads(fixed)
+                except json.JSONDecodeError:
+                    return JSONResponse(status_code=400, content={"error": f"Invalid JSON: {e}"})
+            else:
+                return JSONResponse(status_code=400, content={"error": f"Invalid JSON: {e}"})
         method = body.get("method", "")
         req_id = body.get("id")
 
