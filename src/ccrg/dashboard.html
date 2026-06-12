@@ -11,6 +11,9 @@
   .header h1{font-size:22px;font-weight:600;color:#f1f5f9}
   .header-right{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
   .badge{background:#334155;color:#94a3b8;padding:4px 10px;border-radius:12px;font-size:11px}
+  .refresh-btn{background:#334155;color:#94a3b8;border:1px solid #475569;padding:4px 12px;border-radius:8px;cursor:pointer;font-size:12px;transition:all .15s}
+  .refresh-btn:hover{background:#475569;color:#f1f5f9}
+  .refresh-btn:active{transform:rotate(180deg)}
   .container{max-width:1200px;margin:0 auto;padding:24px}
   .filter-bar{display:flex;align-items:center;gap:8px;margin-bottom:20px;flex-wrap:wrap}
   .filter-btn{background:#1e293b;color:#94a3b8;border:1px solid #334155;padding:7px 16px;border-radius:8px;cursor:pointer;font-size:13px;transition:all .15s}
@@ -52,6 +55,7 @@
 <div class="header">
   <h1>CCRG Dashboard</h1>
   <div class="header-right">
+    <button class="refresh-btn" id="refresh-btn" onclick="manualRefresh()">↻ 刷新</button>
     <span class="badge" id="auto-badge">Auto 30s</span>
   </div>
 </div>
@@ -237,6 +241,10 @@ async function loadStats() {
 
 loadStats();
 setInterval(loadStats, 30000);
+
+function manualRefresh() {
+  loadStats();
+}
 </script>
 </body>
 </html>

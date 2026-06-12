@@ -860,7 +860,7 @@ _sse_sessions: dict[str, asyncio.Queue] = {}
 _current_session_queue: asyncio.Queue | None = None
 
 
-def _emit_sse(event: dict):
+def _emit_sse(event: dict, **kwargs):
     """向当前 SSE 会话推送一个事件（由 _code_loop 等调用）"""
     global _current_session_queue
     if _current_session_queue:

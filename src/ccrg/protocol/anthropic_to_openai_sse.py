@@ -124,9 +124,10 @@ class AnthropicToOpenAISSEConverter:
             delta_chunk = chunk.get("delta", {})
             stop_reason = delta_chunk.get("stop_reason", "stop")
             usage = chunk.get("usage", {})
+            # message_delta 只补充，不覆盖已有值（message_start 已提取过的）
             if usage.get("output_tokens"):
                 self.output_tokens = usage["output_tokens"]
-            if usage.get("input_tokens"):
+            if usage.get("input_tokens") and self.input_tokens == 0:
                 self.input_tokens = usage["input_tokens"]
 
             # 发送 finish
@@ -226,11 +227,13 @@ class AnthropicToOpenAISSEConverter:
         return [b"data: [DONE]\n\n"]
 
     def _extract_usage(self, chunk: dict):
-        """从 message_start 中提取 usage"""
+        """从 message_start 中提取 usage（只补充，不覆盖）"""
         msg = chunk.get("message", {})
         usage = msg.get("usage", {})
-        self.input_tokens = usage.get("input_tokens", 0)
-        self.output_tokens = usage.get("output_tokens", 0)
+        if usage.get("input_tokens"):
+            self.input_tokens = usage["input_tokens"]
+        if usage.get("output_tokens"):
+            self.output_tokens = usage["output_tokens"]
 
     def get_usage(self) -> dict[str, int]:
         """获取 token 使用量"""
