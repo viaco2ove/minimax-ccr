@@ -95,8 +95,9 @@ class SemanticSplitterLocal(Splitter):
             if top_kws:
                 result[category] = top_kws
 
-        # 打印带分数的命中结果
-        log_items = [f"{cat}:{kws}" for cat, kws in result.items()]
+        # 打印带分数的命中结果，按最高分降序排序
+        sorted_result = sorted(result.items(), key=lambda x: max(s for _, s in x[1]), reverse=True)
+        log_items = [f"{cat}:{kws}" for cat, kws in sorted_result]
         logger.debug(f"[SemanticSplitterLocal] matched Arr: {{{', '.join(log_items)}}}")
 
         return result
