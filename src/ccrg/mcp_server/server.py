@@ -858,16 +858,40 @@ _sse_sessions: dict[str, asyncio.Queue] = {}
 
 # 用于在 handler 调用链中传递当前 session 的 SSE 队列（避免改函数签名）
 _current_session_queue: asyncio.Queue | None = None
+# MCP progressToken：客户端（Qoder）通过 params._meta.progressToken 传递；
+# 若存在，则中间事件用 notifications/progress 格式推送（JSON-RPC 2.0 兼容）
+_current_progress_token: str | int | None = None
+_current_progress_counter: int = 0
 
 
 def _emit_sse(event: dict, **kwargs):
-    """向当前 SSE 会话推送一个事件（由 _code_loop 等调用）"""
-    global _current_session_queue
-    if _current_session_queue:
-        try:
+    """向当前 SSE 会话推送一个事件。
+
+    - 若 _current_progress_token 存在（MCP 标准客户端如 Qoder）：
+      转换为 JSON-RPC 2.0 notifications/progress 通知，Qoder 可识别并显示进度
+    - 否则（外部脚本如 ccrg_code_watcher.py）：
+      直接推送原始 {"type":"step",...} 事件，保持向后兼容
+    """
+    global _current_session_queue, _current_progress_token, _current_progress_counter
+    if _current_session_queue is None:
+        return
+    try:
+        if _current_progress_token is not None:
+            _current_progress_counter += 1
+            notification = {
+                "jsonrpc": "2.0",
+                "method": "notifications/progress",
+                "params": {
+                    "progressToken": _current_progress_token,
+                    "progress": _current_progress_counter,
+                    "message": event.get("text", ""),
+                },
+            }
+            _current_session_queue.put_nowait(notification)
+        else:
             _current_session_queue.put_nowait(event)
-        except Exception:
-            pass
+    except Exception:
+        pass
 
 
 # ─── 注册路由（集成到 CCRG 主服务）───────────────────────────────
@@ -920,7 +944,7 @@ def register_routes(app: FastAPI, base_url_provider: Callable[[], str]):
     @app.post("/mcp/messages")
     async def mcp_messages(request: Request, sessionId: str = ""):
         """MCP SSE 消息端点"""
-        global _current_session_queue
+        global _current_session_queue, _current_progress_token, _current_progress_counter
 
         # 宽松 JSON 解析：允许 trailing comma
         raw_body = await request.body()
@@ -951,31 +975,49 @@ def register_routes(app: FastAPI, base_url_provider: Callable[[], str]):
             task_type = tool_args.get("task_type", "")
             is_loop = (tool_name == "ccrg_code" and task_type == "loop")
 
+            # MCP 标准：客户端通过 params._meta.progressToken 声明支持进度通知
+            meta = body.get("params", {}).get("_meta", {}) or {}
+            progress_token = meta.get("progressToken")
+
             logger.info(f"[MCP-SSE] method={method}, id={req_id}, tool={tool_name}, session={sessionId[:8]}...")
             logger.info(f"[MCP-SSE] tool_call: {tool_name} args={json.dumps(tool_args, ensure_ascii=False)[:200]}")
+            if progress_token is not None:
+                logger.info(f"[MCP-SSE] progressToken={progress_token} → 启用 JSON-RPC 进度通知")
 
             # 所有 ccrg_code 工具都支持流式：设置 SSE 队列
             should_stream = tool_args.get("stream", True)
             if should_stream and tool_name == "ccrg_code" and sessionId and sessionId in _sse_sessions:
                 _current_session_queue = _sse_sessions[sessionId]
+                _current_progress_token = progress_token
+                _current_progress_counter = 0
                 logger.info(f"[MCP-SSE] stream=true: SSE queue set for session {sessionId[:8]}...")
                 try:
                     response = await handle_jsonrpc(body, base_url_provider())
                 finally:
                     _current_session_queue = None
+                    _current_progress_token = None
+                    _current_progress_counter = 0
+                # 关键修复：把最终 JSON-RPC 响应推送到 SSE 队列，
+                # 这样 Qoder 才能在 SSE 流上收到 id 匹配的 result，避免超时 51500
+                if response is not None and sessionId in _sse_sessions:
+                    await _sse_sessions[sessionId].put(response)
                 return JSONResponse(content={"status": "accepted"})
             elif should_stream and tool_name == "ccrg_code":
                 # 无 session 时，直接返回 SSE 流
                 logger.info(f"[MCP-SSE] stream=true: inline SSE (no session)")
 
                 async def sse_stream():
-                    global _current_session_queue
+                    global _current_session_queue, _current_progress_token, _current_progress_counter
                     q: asyncio.Queue = asyncio.Queue()
                     _current_session_queue = q
+                    _current_progress_token = progress_token
+                    _current_progress_counter = 0
 
                     async def run():
                         try:
-                            await handle_jsonrpc(body, base_url_provider())
+                            resp = await handle_jsonrpc(body, base_url_provider())
+                            if resp is not None:
+                                q.put_nowait(resp)  # 最终结果
                         finally:
                             q.put_nowait(None)  # 结束信号
 
@@ -987,6 +1029,8 @@ def register_routes(app: FastAPI, base_url_provider: Callable[[], str]):
                         yield f"event: message\ndata: {json.dumps(item, ensure_ascii=False)}\n\n"
                     await t
                     _current_session_queue = None
+                    _current_progress_token = None
+                    _current_progress_counter = 0
 
                 return StreamingResponse(sse_stream(), media_type="text/event-stream")
             else:
