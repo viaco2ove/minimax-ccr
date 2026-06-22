@@ -30,8 +30,9 @@ minimax 2.7 太笨了，但是便宜
 ## 快速开始
 
 ### 1. 安装依赖
-
+[READEME.venv.md](md/code/READEME.venv.md).venv
 ```bash
+.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 

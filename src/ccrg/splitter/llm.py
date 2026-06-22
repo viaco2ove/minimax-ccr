@@ -8,6 +8,8 @@ LLMSplitter — 基于 LLM 模型的工作流意图分流器。
 import json
 import logging
 import re
+import threading
+import time as _time
 from typing import Any
 
 import httpx
@@ -21,24 +23,17 @@ logger = logging.getLogger("ccrg")
 class LLMSplitter(Splitter):
     """使用 LLM 模型分析关键词并返回路由 — 取代 keyword_routing"""
 
-    SYSTEM_PROMPT = """你是请求分流关键词匹配器，**仅输出纯JSON，禁止任何多余文字、解释、备注**。按给定关键词库精准匹配，命中就填入对应数组，无匹配字段直接省略。输出格式严格遵循示例：{"workflow_intent":{"chat_intention":["咋样"]}}
-关键词库：{keywords_json}"""
+    # Prompt 模板在 __init__ 时用 keywords.llm.json 动态生成
+    SYSTEM_PROMPT_TEMPLATE = """你是分流关键词匹配器。
+输入: {user_content}
 
-    USER_PROMPT_TEMPLATE = """{user_content}
+关键词库：
+{keywords_text}
 
-<instruction>
-作为模型分流器，请根据上文提供的关键词列表，分析用户的 user_query 命中了哪些关键词。
-必须严格且仅输出 JSON 格式数据，不要包含任何思考过程、不要使用 Markdown 代码块（如 ```json）、不要有任何其他自然语言废话。
-示例格式：
-{{
-  "workflow_intent": {{
-    "intention_analyze": ["帮我"]
-  }},
-  "task_routing": {{
-    "cheap_tasks": ["查看"]
-  }}
-}}
-</instruction>"""
+输出格式（仅JSON，禁止任何其他文字）：
+{{"chat_intention":[],"intention_analyze":[],"problem_analyze":[],"solution_plan":[],"execute_solve":[]}}"""
+
+    USER_PROMPT_TEMPLATE = ""
 
     def __init__(self, config: dict[str, Any] | None, keywords: dict, registry: Any = None, usage_stats: Any = None):
         self.config = config or {}
@@ -67,16 +62,43 @@ class LLMSplitter(Splitter):
         self.gguf_download_headers = local_cfg.get("download_headers", {}) or {}
         # GGUF 存储路径（项目根目录下的 local_models/）
         self.gguf_local_dir = local_cfg.get("local_dir", "local_models")
+        # llama-cpp-python 推理参数
+        self.gguf_n_ctx = local_cfg.get("n_ctx", 32768)  # 上下文窗口，默认 32K（Qwen3-0.6B 支持）
+        self.gguf_n_threads = local_cfg.get("n_threads", 8)  # 推理线程数
+        self.gguf_n_threads_batch = local_cfg.get("n_threads_batch", 8)  # 批处理线程数
+        self.gguf_n_batch = local_cfg.get("n_batch", 512)  # prefill 批处理大小，越大 prompt 处理越快
+        self.gguf_use_mlock = local_cfg.get("mlock", True)  # 锁定内存防止交换，加速明显
+        self.gguf_max_tokens = local_cfg.get("max_tokens", 512)  # 推理输出最大 token 数
         # llama-cpp-python 实例
         self._llama_model = None
+        self._llama_load_lock = threading.Lock()  # 防止并发重复加载
         # 安装状态文件路径
         self._state_file = None
         # 活跃的异步安装 Promise（防止重复安装）
         self._install_task = None
 
-        # 组装 system prompt，替换 {keywords_json}
-        keywords_str = json.dumps(keywords, ensure_ascii=False)
-        self.system_prompt = self.SYSTEM_PROMPT.replace("{keywords_json}", keywords_str)
+        # 加载 keywords.llm.json，动态生成 system_prompt
+        from pathlib import Path
+        project_root = Path(__file__).parent.parent.parent.parent
+        llm_keywords_path = project_root / "keywords.llm.json"
+        try:
+            with open(llm_keywords_path, "r", encoding="utf-8") as f:
+                self.keywords_llm = json.load(f)
+            logger.info(f"[LLMSplitter] loaded keywords.llm.json from {llm_keywords_path}")
+        except Exception:
+            self.keywords_llm = self.keywords
+            logger.warning(f"[LLMSplitter] keywords.llm.json not found, using keywords.json")
+
+        # 构建 keywords_text
+        wf = self.keywords_llm.get("workflow_intent", {})
+        lines = []
+        for cat, kws in wf.items():
+            lines.append(f"- {cat}：{','.join(kws)}")
+        keywords_text = "\n".join(lines)
+        self.system_prompt = self.SYSTEM_PROMPT_TEMPLATE.format(
+            keywords_text=keywords_text,
+            user_content="[用户输入将在此处替换]",
+        )
 
         self.fallback_splitter: Splitter | None = None
 
@@ -86,7 +108,6 @@ class LLMSplitter(Splitter):
             if self.local_model_run_start:
                 logger.info(f"[LLMSplitter] 本地模型路由检测到，GGUF={self.gguf_file_name}，启动时异步安装/预热...")
                 # 异步执行，不阻塞服务启动（参考 Toonflow startQwen060OnBoot）
-                import threading
                 t = threading.Thread(target=self._start_on_boot, daemon=True)
                 t.start()
             else:
@@ -100,16 +121,26 @@ class LLMSplitter(Splitter):
             return self._keyword_fallback(body)
 
         for route in self.routes:
+            start = _time.time()
+            is_local = route.startswith("local:")
+            logger.info(f"[LLMSplitter] >>> 尝试 route={route}, user_content={user_content[:50]}...")
+
             try:
                 verbose_log("LLMSplitter", "_call_llm start", "LLM_SPLITTER_DEBUG")
                 result = self._call_llm(route, user_content)
+                elapsed = _time.time() - start
                 verbose_log("LLMSplitter", f"_call_llm end, result length={len(result) if result else 0}", "LLM_SPLITTER_DEBUG")
+
                 if result:
                     verbose_log("LLMSplitter", f"result preview: {result[:200] if len(result) > 200 else result}", "LLM_SPLITTER_DEBUG")
                     matched = self._parse_llm_response(result)
                     verbose_log("LLMSplitter", f"parsed matched: {matched}", "LLM_SPLITTER_DEBUG")
-                    # matched 可能是空 dict，也是有效结果（没命中任何 workflow 关键词）
                     route_str, fb, intent = self._resolve_route_from_keywords(matched)
+                    # matched 可能是空 dict，也是有效结果
+                    logger.info(
+                        f"[LLMSplitter] <<< 成功 route={route} | 耗时={elapsed:.1f}s | "
+                        f"matched={matched} | intent={intent} | 最终route={route_str}"
+                    )
                     return RoutingDecision(
                         intent=intent,
                         route=route_str,
@@ -117,55 +148,104 @@ class LLMSplitter(Splitter):
                         matched_reason=f"keywords={matched}" if matched else "no_match",
                         fallback=fb,
                     )
-                verbose_log("LLMSplitter", f"{route} returned empty result", "LLM_SPLITTER_DEBUG")
+                logger.info(f"[LLMSplitter] <<< route={route} 返回空结果，继续下一个 | elapsed={elapsed:.1f}s")
             except Exception as e:
                 import traceback
+                elapsed = _time.time() - start
+                logger.warning(f"[LLMSplitter] <<< route={route} 失败: {e} | elapsed={elapsed:.1f}s")
                 verbose_log("LLMSplitter", f"{route} failed: {e}\n{traceback.format_exc()}", "LLM_SPLITTER_DEBUG")
                 continue
 
+        logger.info("[LLMSplitter] 所有 route 均失败，回退到 keyword fallback")
         verbose_log("LLMSplitter", "all routes failed, using keyword fallback", "LLM_SPLITTER_DEBUG")
         return self._keyword_fallback(body)
 
     def _parse_llm_response(self, text: str) -> dict:
-        """解析 LLM 返回的 JSON，返回 workflow_intent（可能为空 dict）"""
+        """解析 LLM 返回的 JSON，直接返回 categories -> [(kw, score)] 结构，对齐 semantic_splitter"""
         text = text.strip()
-        verbose_log("LLMSplitter", f"_parse_llm_response input: {text[:300] if len(text) > 300 else text}", "LLM_SPLITTER_DEBUG")
+        logger.info(f"[LLMSplitter] _parse_llm_response: {text[:300]}")
+        # 提取 JSON 对象
         json_match = re.search(r'\{[\s\S]*\}', text)
         if not json_match:
-            verbose_log("LLMSplitter", "no JSON found in response", "LLM_SPLITTER_DEBUG")
+            logger.warning(f"[LLMSplitter] 无 JSON，尝试直接解析为数组")
+            # 尝试解析为纯数组：["kw1", "kw2"] → chat_intention:[(kw1,1.0),(kw2,1.0)]
+            try:
+                arr = json.loads(text)
+                if isinstance(arr, list):
+                    return {"chat_intention": [(kw, 1.0) if isinstance(kw, str) else kw for kw in arr]}
+            except Exception:
+                pass
             return {}
+
         try:
             data = json.loads(json_match.group())
-            verbose_log("LLMSplitter", f"parsed JSON keys: {list(data.keys())}", "LLM_SPLITTER_DEBUG")
-            result = data.get("workflow_intent", {})
-            verbose_log("LLMSplitter", f"workflow_intent: {result}", "LLM_SPLITTER_DEBUG")
-            return result if result else {}
+            result = {}
+            for cat, val in data.items():
+                if not isinstance(val, list):
+                    continue
+                items = []
+                for item in val:
+                    if isinstance(item, str):
+                        items.append((item, 1.0))
+                    elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                        items.append((str(item[0]), float(item[1])))
+                if items:
+                    result[cat] = items
+            logger.info(f"[LLMSplitter] parsed matched: {result}")
+            return result
         except json.JSONDecodeError as e:
-            verbose_log("LLMSplitter", f"JSON parse error: {e}", "LLM_SPLITTER_DEBUG")
+            logger.warning(f"[LLMSplitter] JSON 解析失败: {e}")
             return {}
 
     def _resolve_route_from_keywords(self, matched: dict) -> tuple[str, list[str] | None, str]:
-        """根据命中的关键词从 keyword_routing.rules 找路由"""
+        """根据命中的关键词从 keyword_routing.rules 找路由，对齐 semantic_splitter 风格"""
         rules = self.config.get("routing", {}).get("keyword_routing", {}).get("rules", [])
+
+        # 打印带分数的命中结果，按每个 category 最高分降序
+        if matched:
+            sorted_matched = sorted(
+                matched.items(),
+                key=lambda x: max(s for _, s in x[1]) if x[1] else 0,
+                reverse=True,
+            )
+            log_items = [f"{cat}:{kws}" for cat, kws in sorted_matched]
+            logger.info(f"[LLMSplitter] matched Arr: {{{', '.join(log_items)}}}")
+
+        # 提取纯关键词列表（用于匹配 rules）
+        def extract_kws(cat_matched):
+            """从 [(kw, score), ...] 或 [kw, ...] 中提取关键词列表"""
+            kws = []
+            for item in cat_matched:
+                if isinstance(item, (list, tuple)):
+                    kws.append(item[0])
+                else:
+                    kws.append(item)
+            return kws
 
         chat_matched = matched.get("chat_intention", [])
         task_matched = matched.get("intention_analyze", [])
+        chat_kws = extract_kws(chat_matched)
+        task_kws = extract_kws(task_matched)
 
-        if len(task_matched) > len(chat_matched):
+        # 按命中数量判断 intent
+        if len(task_kws) > len(chat_kws):
             intent = "task"
-            matched_kws = task_matched
+            matched_kws = task_kws
         else:
             intent = "chat"
-            matched_kws = chat_matched if chat_matched else task_matched
+            matched_kws = chat_kws if chat_kws else task_kws
 
+        # 用关键词去 rules 里匹配
         for rule in rules:
             rule_kws = rule.get("keywords", [])
             if any(kw in rule_kws for kw in matched_kws):
                 route = rule.get("route", "")
                 fb = rule.get("fallback", [])
+                logger.info(f"[LLMSplitter] 命中 rule keywords={matched_kws} -> route={route}")
                 return route, fb if fb else None, intent
 
         default = self.config.get("routing", {}).get("default", "minimax:MiniMax-M2.7")
+        logger.info(f"[LLMSplitter] 未命中任何 rule，使用 default route={default}")
         return default, None, intent
 
     def _call_llm(self, route: str, user_content: str) -> str:
@@ -328,42 +408,47 @@ class LLMSplitter(Splitter):
             finally:
                 self._install_task = None
 
-        import threading
         self._install_task = threading.Thread(target=do_install, daemon=True)
         self._install_task.start()
         return self._install_task
 
     def _load_llama_model(self):
-        """加载 GGUF 模型到内存（参考 Toonflow ensureModelLoaded）"""
+        """加载 GGUF 模型到内存（参考 Toonflow ensureModelLoaded，加锁防止并发重复加载）"""
         if self._llama_model is not None:
             return
 
-        model_file = self._get_model_file_path()
-        import os
-        if not os.path.exists(model_file):
-            raise RuntimeError(f"GGUF 模型文件不存在: {model_file}，请先运行安装")
+        with self._llama_load_lock:
+            # double-check：抢到锁后再确认一次
+            if self._llama_model is not None:
+                return
 
-        logger.info(f"[LLMSplitter] 正在加载 GGUF 模型: {model_file}...")
-        import time
-        start = time.time()
+            model_file = self._get_model_file_path()
+            import os
+            if not os.path.exists(model_file):
+                raise RuntimeError(f"GGUF 模型文件不存在: {model_file}，请先运行安装")
 
-        try:
-            from llama_cpp import Llama
-            self._llama_model = Llama(
-                model_path=model_file,
-                n_ctx=4096,
-                n_threads=4,
-                use_mmap=True,
-                use_mlock=False,
-                verbose=False,
-            )
-            elapsed = time.time() - start
-            logger.info(f"[LLMSplitter] GGUF 模型加载完成，耗时 {elapsed:.1f}s")
-        except ImportError:
-            raise RuntimeError(
-                "llama-cpp-python 未安装，请运行: pip install llama-cpp-python\n"
-                "加速安装: pip install llama-cpp-python --force-reinstall --no-cache-dir"
-            )
+            logger.info(f"[LLMSplitter] 正在加载 GGUF 模型: {model_file}...")
+            start = _time.time()
+
+            try:
+                from llama_cpp import Llama
+                self._llama_model = Llama(
+                    model_path=model_file,
+                    n_ctx=self.gguf_n_ctx,
+                    n_threads=self.gguf_n_threads,
+                    n_threads_batch=self.gguf_n_threads_batch,
+                    n_batch=self.gguf_n_batch,
+                    use_mmap=True,
+                    use_mlock=self.gguf_use_mlock,
+                    verbose=False,
+                )
+                elapsed = _time.time() - start
+                logger.info(f"[LLMSplitter] GGUF 模型加载完成，耗时 {elapsed:.1f}s")
+            except ImportError:
+                raise RuntimeError(
+                    "llama-cpp-python 未安装，请运行: pip install llama-cpp-python\n"
+                    "加速安装: pip install llama-cpp-python --force-reinstall --no-cache-dir"
+                )
 
     def _start_on_boot(self):
         """启动时自动安装/预热（参考 Toonflow startQwen060OnBoot）"""
@@ -383,8 +468,6 @@ class LLMSplitter(Splitter):
 
     def _call_local_model(self, user_content: str) -> str:
         """调用本地 GGUF LLM 模型（llama-cpp-python，参考 Toonflow chatWithQwen060）"""
-        import time as _time
-
         status = self._get_install_status()
         if status["status"] != "installed":
             raise RuntimeError(f"Qwen3-0.6B 未安装: {status['message']}，请先安装")
@@ -406,7 +489,7 @@ class LLMSplitter(Splitter):
         start = _time.time()
         resp = self._llama_model.create_chat_completion(
             messages=chat_messages,
-            max_tokens=512,
+            max_tokens=self.gguf_max_tokens,
             temperature=0.3,
             stop=["<|end_of_text|>", "<|reserved_200|>"],
         )
@@ -429,16 +512,10 @@ class LLMSplitter(Splitter):
         return content
 
     def _build_messages(self, user_content: str) -> list:
-        """构建 messages 数组，符合 Anthropic 格式"""
+        """构建 messages 数组，用户输入替换进 system prompt"""
+        prompt = self.system_prompt.replace("[用户输入将在此处替换]", user_content)
         return [
-            {
-                "role": "system",
-                "content": [{"type": "text", "text": self.system_prompt}]
-            },
-            {
-                "role": "user",
-                "content": [{"type": "text", "text": self.USER_PROMPT_TEMPLATE.format(user_content=user_content)}]
-            }
+            {"role": "system", "content": prompt},
         ]
 
     def _call_via_registry(self, provider: str, model: str, user_content: str, prov_config: Any) -> str:
