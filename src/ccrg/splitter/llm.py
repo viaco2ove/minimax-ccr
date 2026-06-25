@@ -69,6 +69,12 @@ class LLMSplitter(Splitter):
         self.gguf_n_batch = local_cfg.get("n_batch", 512)  # prefill 批处理大小，越大 prompt 处理越快
         self.gguf_use_mlock = local_cfg.get("mlock", True)  # 锁定内存防止交换，加速明显
         self.gguf_max_tokens = local_cfg.get("max_tokens", 512)  # 推理输出最大 token 数
+        # KV cache 量化类型（可显著减少内存占用）
+        # type_k: K cache 量化类型（如 "f16", "q8_0", "q4_0", "q3_k", "q5_k"）
+        # type_v: V cache 量化类型（同上）
+        # 设置后 llama-cpp 会对 KV cache 进行量化，内存占用大幅降低
+        self.gguf_type_k = local_cfg.get("type_k", None)
+        self.gguf_type_v = local_cfg.get("type_v", None)
         # llama-cpp-python 实例
         self._llama_model = None
         self._llama_load_lock = threading.Lock()  # 防止并发重复加载
@@ -432,7 +438,7 @@ class LLMSplitter(Splitter):
 
             try:
                 from llama_cpp import Llama
-                self._llama_model = Llama(
+                llama_kwargs = dict(
                     model_path=model_file,
                     n_ctx=self.gguf_n_ctx,
                     n_threads=self.gguf_n_threads,
@@ -442,6 +448,26 @@ class LLMSplitter(Splitter):
                     use_mlock=self.gguf_use_mlock,
                     verbose=False,
                 )
+                # KV cache 量化（需要 llama-cpp-python >= 0.2.60）
+                # type_k/type_v 需要 GGML 整数枚举值，将字符串映射为常量
+                ggml_type_map = {
+                    "f32": 0, "f16": 1,
+                    "q4_0": 2, "q4_1": 3,
+                    "q5_0": 6, "q5_1": 7,
+                    "q8_0": 8,
+                    "q8_1": 9,
+                    "q2_k": 10, "q3_k": 11, "q4_k": 12, "q5_k": 13, "q6_k": 14, "q8_k": 15,
+                }
+                if self.gguf_type_k:
+                    tk = ggml_type_map.get(str(self.gguf_type_k).lower())
+                    if tk is not None:
+                        llama_kwargs["type_k"] = tk
+                if self.gguf_type_v:
+                    tv = ggml_type_map.get(str(self.gguf_type_v).lower())
+                    if tv is not None:
+                        llama_kwargs["type_v"] = tv
+                logger.info(f"[LLMSplitter] KV cache量化: type_k={self.gguf_type_k}, type_v={self.gguf_type_v}")
+                self._llama_model = Llama(**llama_kwargs)
                 elapsed = _time.time() - start
                 logger.info(f"[LLMSplitter] GGUF 模型加载完成，耗时 {elapsed:.1f}s")
             except ImportError:
@@ -474,14 +500,11 @@ class LLMSplitter(Splitter):
 
         self._load_llama_model()
 
-        messages = self._build_messages(user_content)
-        system_text = messages[0]["content"][0]["text"]
-        user_text = messages[1]["content"][0]["text"]
-
-        # 构建 messages 格式（禁用思考模式 /no_think）
+        # 构建 messages（system prompt 包含用户输入，用 /no_think 禁用思考）
+        prompt = self.system_prompt.replace("[用户输入将在此处替换]", user_content)
         chat_messages = [
-            {"role": "system", "content": system_text},
-            {"role": "user", "content": f"{user_text}\n/no_think"},
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": "/no_think"},
         ]
 
         verbose_log("LLMSplitter", f"[local:gguf] messages: {chat_messages}", "LLM_SPLITTER_DEBUG")
