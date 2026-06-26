@@ -1,6 +1,6 @@
 # Claude Code Router Gateway (CCRG)
 
-极薄的 AI 请求网关，支持在同一 agent loop 内根据请求特征动态路由到不同 provider。
+极薄的 AI 请求网关，支持在同一 agent loop 内根据请求特征动态路由到不同 provider。1
 
 ![img.png](img.png)
 
