@@ -12,3 +12,4 @@ logs/
 /sse_result.txt
 /sse_test_out.txt
 /keywords.json
+/local_models/
