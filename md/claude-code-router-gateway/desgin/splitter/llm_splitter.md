@@ -153,7 +153,7 @@ curl --location 'https://api.minimaxi.com/anthropic/v1/messages' \
 ```
 curl --location 'https://api.minimaxi.com/anthropic/v1/messages' \
 --header 'Content-Type: application/json' \
---header 'Authorization: Bearer sk-cp-BgYFK1oZIWVhfvsS5N70jzERxXTlYSorFFZg5oobA8B46udD6zS0kzQ7cjAjZgjQDPruhXMI8inZpn2YoYDdWr0JgM2CJtz_x78DT80FIuetWFZQUXLuThw' \
+--header 'Authorization: Bearer xxxx' \
 --header 'anthropic-version: 2023-06-01' \
 --data-raw '{
     "model": "MiniMax-M2.7",
