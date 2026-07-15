@@ -1111,7 +1111,13 @@ def _get_stage_routes(stage: str, body: dict = None) -> tuple[list[str], str]:
     elif stage == "analyze_plan":
         return _config.workflow.get_analyze_plan_list(), "analyze_plan"
     elif stage == "execute_solve":
-        return _config.workflow.get_execute_solve_list(), "execute_solve"
+        # 复用路由引擎：命中 scenario/tool_routing/keyword_routing 规则则用其结果
+        # （如 ToolSearch 命中 tool_routing.cheap_tasks -> deepseek-v4-pro），
+        # 否则 _resolve_execute_route 内部兜底到 workflow.execute_solve 列表首项
+        resolved = _resolve_execute_route(body, request_id="")
+        wf_list = _config.workflow.get_execute_solve_list()
+        fallback = [r for r in wf_list if r != resolved]
+        return [resolved] + fallback, "execute_solve"
     else:
         # 未知阶段，默认 execute_solve
         logger.warning(f"Unknown workflow_stage: {stage}, defaulting to execute_solve")
@@ -1942,12 +1948,14 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
             is_chat = (intent == "chat")
             is_user_initiated = _is_user_initiated_message(body)
             
-            if is_chat:
+            # 工具循环回调（非用户主动输入）优先走 execute_solve，
+            # 避免 splitter 误判 intent=chat 把工具循环路由到 chat_intention
+            if not is_user_initiated:
+                stage = "execute_solve"      # 工具回调 -> 直接执行
+            elif is_chat:
                 stage = "chat_intention"
-            elif is_user_initiated:
-                stage = "intention_analyze"  # 首次用户输入 → 意图分析
             else:
-                stage = "execute_solve"      # 工具回调 → 直接执行
+                stage = "intention_analyze"  # 首次用户输入 -> 意图分析
             
             logger.info(f"[{request_id}] Workflow stage (auto-detected): {stage}")
         else:

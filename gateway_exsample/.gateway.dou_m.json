@@ -1,0 +1,217 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 3428,
+    "timeout_ms": 600000,
+    "log_level": "debug",
+    "log_file": "logs/ccrg.log",
+    "proxy_url": "",
+    "api_key":"xxxx",
+    "claude_path": ""
+  },
+  "providers": {
+    "minimax": {
+      "api_base_url": "https://api.minimaxi.com/anthropic",
+      "api_key":"xxxx",
+      "protocol": "codeplan_anthropic",
+      "providers_adapter": "minimax",
+      "models": ["MiniMax-M2.7"],
+      "capabilities": {
+        "tool_use": true,
+        "streaming": true,
+        "thinking": true,
+        "vision": true,
+        "max_context": 32000
+      },
+      "per_request_delay_ms": 1500,
+      "cost_tier": "cheap",
+      "timeout_ms": 1200000,
+      "default_params": {
+        "max_tokens": 4096
+      },
+      "retry": {
+        "max_attempts": 3,
+        "retry_on_status": [429, 500, 502, 503]
+      }
+    },
+    "qianfan": {
+      "api_base_url": "https://qianfan.baidubce.com/anthropic/coding",
+      "api_key":"xxxx",
+      "protocol": "codeplan_anthropic",
+      "models": ["qianfan-code-latest","ernie-4.5-turbo-20260402","glm-5"],
+      "capabilities": {
+        "tool_use": true,
+        "streaming": true,
+        "thinking": true,
+        "vision": true,
+        "max_context": 32000
+      },
+      "per_request_delay_ms": 1500,
+      "cost_tier": "cheap",
+      "timeout_ms": 120000,
+      "retry": {
+        "max_attempts": 1,
+        "retry_on_status": [429, 500, 502, 503]
+      }
+    },
+   "doubao": {
+      "api_base_url": "https://ark.cn-beijing.volces.com/api/coding",
+      "api_key":"xxxx",
+      "protocol": "codeplan_anthropic",
+      "models": ["ark-code-latest","glm-5.2","Kimi-K2.6","doubao-seed-2.0-code","doubao-seed-2.0-pro","doubao-seed-2.0-lite","glm-5.2"],
+      "capabilities": {
+        "tool_use": true,
+        "streaming": true,
+        "thinking": true,
+        "vision": true,
+        "max_context": 32000
+      },
+      "per_request_delay_ms": 1100,
+      "cost_tier": "cheap",
+      "timeout_ms": 120000,
+      "retry": {
+        "max_attempts": 1,
+        "retry_on_status": [429, 500, 502, 503]
+      }
+    },
+    "mmx": {
+      "api_base_url": "https://127.0.0.1:3457",
+      "api_key":"xxxx",
+      "protocol": "mmx",
+      "models": ["MiniMax-M2.7"],
+      "capabilities": {
+        "tool_use": true,
+        "streaming": true,
+        "thinking": true,
+        "vision": true,
+        "max_context": 128000
+      },
+      "per_request_delay_ms": 1500,
+      "cost_tier": "cheap",
+      "default_params": {
+        "max_tokens": 4096
+      },
+      "retry": {
+        "max_attempts": 2,
+        "retry_on_status": [429, 500, 502, 503]
+      }
+    },
+    "deepseek": {
+      "api_base_url": "https://api.deepseek.com",
+      "api_key":"xxxx",
+      "protocol": "chat_openai",
+      "models": ["deepseek-chat", "deepseek-reasoner", "deepseek-v4-pro","deepseek-v4-flash"],
+      "capabilities": {
+        "tool_use": true,
+        "streaming": true,
+        "thinking": true,
+        "vision": true,
+        "max_context": 64000
+      },
+      "per_request_delay_ms": 1500,
+      "cost_tier": "premium",
+      "retry": {
+        "max_attempts": 2,
+        "retry_on_status": [429, 500, 502, 503]
+      }
+    }
+  },
+  "routing": {
+    "default": "doubao:doubao-seed-2.0-code",
+    "scenarios": {
+      "background": {
+        "route": "doubao:doubao-seed-2.0-code",
+        "fallback": ["doubao:ark-code-latest","minimax:MiniMax-M2.7"]
+      },
+      "think": {
+        "route": "doubao:ark-code-latest",
+        "fallback": ["doubao:doubao-seed-2.0-code","minimax:MiniMax-M2.7"]
+      },
+      "long_context": {
+        "route": "doubao:ark-code-latest",
+        "fallback": ["doubao:doubao-seed-2.0-code","minimax:MiniMax-M2.7"],
+        "threshold": 80000
+      },
+      "web_search": {
+        "route": "doubao:doubao-seed-2.0-code",
+        "fallback": ["doubao:ark-code-latest","minimax:MiniMax-M2.7"]
+      },
+      "image": {
+        "route": "doubao:doubao-seed-2.0-pro",
+        "fallback": ["mmx:MiniMax-M2.7","minimax:MiniMax-M2.7","doubao:ark-code-latest","minimax:MiniMax-M2.7"]
+      },
+      "compact": {
+        "route": "doubao:doubao-seed-2.0-code",
+        "fallback": ["doubao:ark-code-latest","minimax:MiniMax-M2.7"]
+      }
+    },
+    "tool_routing": {
+      "cheap_tasks": {
+        "match": [
+          "Read", "Glob", "Grep",
+          "Bash(git status)", "Bash(git diff)", "Bash(git log)",
+          "Bash(ls *)", "Bash(cat *)", "Bash(head *)"
+        ],
+        "match_mode": "any",
+        "route": "minimax:MiniMax-M2.7",
+        "fallback": ["doubao:ark-code-latest","doubao:doubao-seed-2.0-code"]
+      },
+      "standard_tasks": {
+        "match": ["Edit", "Write", "NotebookEdit","MultiEdit"],
+        "match_mode": "any",
+        "route": "minimax:MiniMax-M2.7",
+        "fallback": ["doubao:ark-code-latest","doubao:doubao-seed-2.0-code"]
+      },
+      "complex_tasks": {
+        "match": ["Agent", "TaskCreate", "EnterPlanMode"],
+        "match_mode": "any",
+        "route": "doubao:ark-code-latest",
+        "fallback": ["doubao:doubao-seed-2.0-code","minimax:MiniMax-M2.7"]
+      }
+    },
+    "keyword_routing": {
+      "rules": [
+        {
+          "keywords": ["架构", "architecture", "重构", "refactor", "优化", "设计模式", "模块化",
+            "拆分", "合并", "升级", "改造","分析","设计","处理","你个垃圾","这他妈","白痴","[deep]"],
+          "match_mode": "any",
+          "scope": "user_message",
+          "route": "doubao:ark-code-latest",
+          "fallback": ["doubao:doubao-seed-2.0-code","minimax:MiniMax-M2.7"]
+        },
+        {
+          "keywords": ["/compact", "compact"],
+          "match_mode": "any",
+          "scope": "user_message",
+          "route": "doubao:doubao-seed-2.0-code",
+          "fallback": ["doubao:ark-code-latest","minimax:MiniMax-M2.7"]
+        }
+      ]
+    },
+    "priority": ["scenario", "tool_routing", "keyword_routing", "default"],
+    "splitter": {
+      "active_strategy": "semantic_splitter",
+      "semantic_splitter": {
+          "type": "local",
+          "model_name": "moka-ai/m3e-small",
+          "trust_remote_code": true
+      }
+    }
+  },
+  "quota": {
+    "minimax_codeplan": {
+      "enabled": true,
+      "provider": "minimax",
+      "track_usage": true,
+      "fallback_on_exhaust": "doubao:doubao-seed-2.0-code",
+      "warning_threshold": 0.2
+    }
+  },
+  "workflow": {
+    "enabled": true,
+    "intention_analyze": ["doubao:ark-code-latest","minimax:MiniMax-M2.7"],
+    "chat_intention": ["doubao:doubao-seed-2.0-code","doubao:ark-code-latest"],
+    "analyze_plan": ["doubao:doubao-seed-2.0-code","doubao:ark-code-latest"],
+    "execute_solve": ["doubao:doubao-seed-2.0-code","doubao:ark-code-latest"]
+  }
+}
