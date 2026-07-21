@@ -49,8 +49,11 @@ class SemanticSplitterLocal(Splitter):
         # 遍历所有关键词，计算相似度，找出命中的关键词
         matched = self._match_keywords(model, user_emb)
 
+        # 计算每 category 的最高相似度（含不过阈值的），用于 intent 判定
+        best_scores = self._best_scores_per_category(model, user_emb)
+
         # 根据命中关键词解析路由
-        route_str, fb, intent = self._resolve_route_from_keywords(matched)
+        route_str, fb, intent = self._resolve_route_from_keywords(matched, best_scores)
 
         logger.debug(f"[SemanticSplitterLocal] matched :{intent} , route_str:{route_str}, fb:{fb}")
         return RoutingDecision(
@@ -102,7 +105,7 @@ class SemanticSplitterLocal(Splitter):
 
         return result
 
-    def _resolve_route_from_keywords(self, matched: dict) -> tuple[str, list[str] | None, str]:
+    def _resolve_route_from_keywords(self, matched: dict, best_scores: dict | None = None) -> tuple[str, list[str] | None, str]:
         """根据命中关键词从 keyword_routing.rules 找路由，和 llm_splitter 逻辑一致"""
         rules = self.config.get("routing", {}).get("keyword_routing", {}).get("rules", [])
 
@@ -112,10 +115,24 @@ class SemanticSplitterLocal(Splitter):
             for item in kws:
                 all_matched_kws.append(item[0] if isinstance(item, tuple) else item)
 
-        # 判断意图：task_keywords 命中多则 task，否则 chat
-        task_count = len(matched.get("intention_analyze", [])) + len(matched.get("problem_analyze", []))
-        chat_count = len(matched.get("chat_intention", []))
-        intent = "task" if task_count > chat_count else "chat"
+        # 判断意图：用"最高分归属"法 —— chat 类与 task 类各自的最高相似度，高的归属即 intent。
+        # 取代旧的计数法（task 用 2 个 category 求和恒 > chat 的 1 个 category，导致"你好"都判 task）。
+        # best_scores 为每 category 的最高分（含不过阈值的）；缺失则视为 0。
+        if best_scores:
+            chat_cats = ["chat_intention"]
+            task_cats = ["intention_analyze", "problem_analyze", "solution_plan", "execute_solve"]
+            chat_best = max((best_scores.get(c, 0.0) for c in chat_cats), default=0.0)
+            task_best = max((best_scores.get(c, 0.0) for c in task_cats), default=0.0)
+            intent = "chat" if chat_best > task_best else "task"
+            logger.debug(
+                f"[SemanticSplitterLocal] intent by best-score: "
+                f"chat_best={chat_best:.3f} task_best={task_best:.3f} -> {intent}"
+            )
+        else:
+            # 兜底：旧计数法（best_scores 不可用时）
+            task_count = len(matched.get("intention_analyze", [])) + len(matched.get("problem_analyze", []))
+            chat_count = len(matched.get("chat_intention", []))
+            intent = "task" if task_count > chat_count else "chat"
 
         # 用所有命中关键词去 rules 里匹配
         for rule in rules:
@@ -128,11 +145,38 @@ class SemanticSplitterLocal(Splitter):
         default = self.config.get("routing", {}).get("default", "minimax:MiniMax-M2.7")
         return default, None, intent
 
+    def _best_scores_per_category(self, model, user_emb: np.ndarray) -> dict:
+        """计算每个 category 的最高相似度（含不过阈值的），用于 intent 判定。
+
+        与 _match_keywords 的 category 遍历逻辑保持一致（problem_analyze 空时用 analyze_plan 顶替）。
+        """
+        result = {}
+        wflow = self.keywords.get("workflow_intent", {})
+        categories = ["chat_intention", "intention_analyze", "problem_analyze", "solution_plan", "execute_solve"]
+
+        for category in categories:
+            kw_list = wflow.get(category, [])
+            if category == "problem_analyze" and not kw_list:
+                kw_list = wflow.get("analyze_plan", [])
+            if not kw_list:
+                continue
+
+            best = 0.0
+            for kw in kw_list:
+                kw_emb = model.encode(kw)
+                score = self._cosine(user_emb, kw_emb)
+                if score > best:
+                    best = score
+            result[category] = round(best, 3)
+
+        return result
+
     def _load_model(self):
         if self._model is None:
-            from sentence_transformers import SentenceTransformer
+            import os
             import time
             import shutil
+            from sentence_transformers import SentenceTransformer
             start = time.time()
 
             # 检查本地缓存是否存在
@@ -140,15 +184,32 @@ class SemanticSplitterLocal(Splitter):
             is_cached = cache_dir and cache_dir.exists()
 
             if is_cached:
-                logger.info(f"[SemanticSplitterLocal] 正在加载模型: {self.model_name}（从本地缓存）...")
+                logger.info(f"[SemanticSplitterLocal] 正在加载模型: {self.model_name}（从本地缓存，离线模式）...")
             else:
                 logger.info(f"[SemanticSplitterLocal] 正在下载模型: {self.model_name}，请稍候（首次可能较慢）...")
 
             try:
-                kwargs = {"device": self.device}
-                if self.trust_remote_code:
-                    kwargs["trust_remote_code"] = True
-                self._model = SentenceTransformer(self.model_name, **kwargs)
+                if is_cached:
+                    # 本地有缓存：强制离线加载，跳过 huggingface_hub 的联网版本检查
+                    # （否则每次启动都会对仓库每个文件发 HEAD 请求比对 ETag，镜像 504 时卡几十秒）
+                    os.environ["HF_HUB_OFFLINE"] = "1"
+                    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+                    from huggingface_hub import snapshot_download
+                    local_path = snapshot_download(
+                        repo_id=self.model_name,
+                        local_files_only=True,
+                    )
+                    logger.info(f"[SemanticSplitterLocal] 本地缓存路径: {local_path}")
+                    kwargs = {"device": self.device}
+                    if self.trust_remote_code:
+                        kwargs["trust_remote_code"] = True
+                    self._model = SentenceTransformer(local_path, **kwargs)
+                else:
+                    # 无缓存：联网下载
+                    kwargs = {"device": self.device}
+                    if self.trust_remote_code:
+                        kwargs["trust_remote_code"] = True
+                    self._model = SentenceTransformer(self.model_name, **kwargs)
                 elapsed = time.time() - start
                 action = "加载" if is_cached else "下载并加载"
                 logger.info(f"[SemanticSplitterLocal] 模型{action}完成，耗时 {elapsed:.1f}s")
@@ -158,6 +219,9 @@ class SemanticSplitterLocal(Splitter):
                 if cache_dir and cache_dir.exists():
                     shutil.rmtree(cache_dir, ignore_errors=True)
                     logger.info(f"[SemanticSplitterLocal] 已清除缓存: {cache_dir}")
+                # 重试前必须关掉离线模式，否则无法联网下载
+                os.environ.pop("HF_HUB_OFFLINE", None)
+                os.environ.pop("TRANSFORMERS_OFFLINE", None)
                 try:
                     from huggingface_hub import snapshot_download
                     local_path = snapshot_download(
@@ -219,4 +283,8 @@ class SemanticSplitterLocal(Splitter):
                 for b in c:
                     if isinstance(b, dict) and b.get("type") == "text":
                         texts.append(b.get("text", ""))
-        return " ".join(texts)
+        joined = " ".join(texts)
+        # 剥离 <system-reminder ...>...</system-reminder> 块，减少噪声对语义匹配的干扰
+        import re
+        joined = re.sub(r"<system-reminder[^>]*>.*?</system-reminder>", " ", joined, flags=re.DOTALL)
+        return joined.strip()

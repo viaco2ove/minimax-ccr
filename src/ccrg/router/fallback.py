@@ -54,7 +54,8 @@ def _get_provider_max_context(route: str) -> int | None:
         if cfg and cfg.providers:
             prov_config = cfg.providers.get(prov_name)
             if prov_config:
-                caps = prov_config.get('capabilities', {})
+                # ProviderConfig 是 dataclass，capabilities 是属性而非 dict key
+                caps = prov_config.capabilities or {}
                 return caps.get("max_context")
     return None
 

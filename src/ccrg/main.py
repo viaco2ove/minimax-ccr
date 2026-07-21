@@ -3,6 +3,7 @@ CCRG FastAPI 主入口。
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -37,12 +38,26 @@ from pathlib import Path
 log_file = Path("logs/ccrg.log")
 log_file.parent.mkdir(parents=True, exist_ok=True)
 
+# 按天分割日志：每天午夜滚动，保留 14 天历史。
+# 分割后历史文件形如 ccrg.log.2026-07-21，当天日志始终写入 ccrg.log。
+from logging.handlers import TimedRotatingFileHandler
+
+_file_handler = TimedRotatingFileHandler(
+    log_file,
+    when="midnight",
+    interval=1,
+    backupCount=14,
+    encoding="utf-8",
+    utc=False,
+)
+_file_handler.suffix = "%Y-%m-%d"  # 历史文件后缀格式
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler(log_file, encoding="utf-8"),
+        _file_handler,
     ],
 )
 logger = logging.getLogger("ccrg")
@@ -60,6 +75,13 @@ _classifier_tool = ToolTypeClassifier()
 _workflow_splitter: Splitter | None = None
 _provider_semaphores: dict[str, asyncio.Semaphore] = {}
 _provider_last_request_time: dict[str, float] = {}
+
+# ── 并发控制 & 连接池 ─────────────────────────────────────────────
+# 全局并发上限：同时处理的请求数（含流式）。4 客户端 × 多轮工具调用时，
+# 超过此数的请求排队等待，避免大请求同时在内存里导致 OOM。
+_global_concurrency: asyncio.Semaphore | None = None
+# 全局共享 httpx 连接池：避免每请求新建 client 的连接/TLS 开销与文件描述符压力。
+_http_client: httpx.AsyncClient | None = None
 
 # ── Dashboard 页面 ──────────────────────────────────────────────
 
@@ -262,6 +284,18 @@ def init_app(config_path: str | None = None) -> FastAPI:
             _provider_semaphores[name] = asyncio.Semaphore(1)
             logger.info(f"Rate limit semaphore for {name}: per_request_delay_ms={delay}")
 
+    # 初始化全局并发控制（防止内存爆炸）
+    global _global_concurrency, _http_client
+    _global_concurrency = asyncio.Semaphore(8)
+    logger.info("Global concurrency semaphore: max 8 concurrent requests")
+
+    # 初始化全局 httpx 客户端（共享连接池，避免每请求新建 TLS 连接）
+    _http_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(600.0, connect=30.0),
+        limits=httpx.Limits(max_connections=32, max_keepalive_connections=16),
+    )
+    logger.info("Global httpx client initialized: max_connections=32, max_keepalive=16")
+
     # 设置日志级别
     log_level_str = _config.server.get("log_level", "info").upper()
     log_level = getattr(logging, log_level_str, logging.INFO)
@@ -282,6 +316,15 @@ def init_app(config_path: str | None = None) -> FastAPI:
     _translator_logger.setLevel(log_level)
 
     app = FastAPI(title="Claude Code Router Gateway")
+
+    @app.on_event("shutdown")
+    async def _shutdown_close_client():
+        """关闭全局 httpx 连接池，防止资源泄漏。"""
+        global _http_client
+        if _http_client is not None:
+            await _http_client.aclose()
+            _http_client = None
+            logger.info("Global httpx client closed")
 
     @app.post("/v1/messages")
     async def handle_messages(request: Request):
@@ -434,6 +477,26 @@ def _build_provider_headers(prov_config) -> dict:
     return headers
 
 
+def _wrap_with_concurrency(gen_factory, request_id: str):
+    """用全局并发信号量包装一个流式 generator factory。
+
+    gen_factory: 无参 callable，返回 async generator。
+    限制同时处理的流式请求数，防止大量大请求同时在内存里导致 OOM。
+    """
+    async def _wrapped():
+        if _global_concurrency is not None:
+            await _global_concurrency.acquire()
+            logger.debug(f"[{request_id}] acquired global concurrency slot")
+        try:
+            async for chunk in gen_factory():
+                yield chunk
+        finally:
+            if _global_concurrency is not None:
+                _global_concurrency.release()
+                logger.debug(f"[{request_id}] released global concurrency slot")
+    return _wrapped()
+
+
 async def _handle_request(request: Request) -> Response:
     """处理 /v1/messages 请求"""
     request_id = f"req_{uuid.uuid4().hex[:8]}"
@@ -528,8 +591,8 @@ async def _handle_request(request: Request) -> Response:
                 )
             else:
                 # 非流式请求
-                async with httpx.AsyncClient(timeout=prov_timeout) as client:
-                    response = await client.post(prov_target_url, json=req_for_provider, headers=prov_headers)
+                async with contextlib.nullcontext(_http_client) as client:
+                    response = await client.post(prov_target_url, json=req_for_provider, headers=prov_headers, timeout=prov_timeout)
                     response.raise_for_status()
 
                     resp_data = response.json()
@@ -604,8 +667,8 @@ async def _handle_request(request: Request) -> Response:
                                 curl_cmd = _make_curl_cmd(prov_target_url, f"logs/req/{req_file.name}", prov_config)
                                 logger.debug(f"[FallbackRouter] [REQ] [CURL]1 [{prov_name}] [{model}]: {req_file} (chars={len(json.dumps(req_for_provider, ensure_ascii=False))})\n{curl_cmd}")
 
-                            async with httpx.AsyncClient(timeout=prov_timeout) as client:
-                                response = await client.post(prov_target_url, json=req_for_provider, headers=prov_headers)
+                            async with contextlib.nullcontext(_http_client) as client:
+                                response = await client.post(prov_target_url, json=req_for_provider, headers=prov_headers, timeout=prov_timeout)
                                 response.raise_for_status()
                                 resp_data = response.json()
                                 transformed_resp = prov_adapter.transform_json_response(resp_data)
@@ -703,8 +766,8 @@ async def _handle_streaming_with_fallback(
             logger.info(f"[{request_id}] Calling {prov_name} at {target_url} (timeout={prov_timeout:.0f}s)")
 
             try:
-                async with httpx.AsyncClient(timeout=prov_timeout) as client:
-                    async with client.stream("POST", target_url, json=req_for_provider, headers=headers) as response:
+                async with contextlib.nullcontext(_http_client) as client:
+                    async with client.stream("POST", target_url, json=req_for_provider, headers=headers, timeout=prov_timeout) as response:
                         response.raise_for_status()
 
                         converter = None
@@ -830,7 +893,10 @@ async def _handle_streaming_with_fallback(
                 route_rule=matched_rule,
             )
 
-    return StreamingResponse(stream_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        _wrap_with_concurrency(stream_generator, request_id),
+        media_type="text/event-stream",
+    )
 
 
 def _strip_unsupported_features(error_msg: str, req_for_provider: dict) -> dict:
@@ -1060,11 +1126,11 @@ def _detect_workflow_intent(body: dict, keywords: dict) -> RoutingDecision:
     return RoutingDecision(intent=intent, route=default, matched_rule="workflow_splitter_fallback")
 
 
-def _resolve_execute_route(body: dict, request_id: str) -> str:
-    """根据路由规则动态决定 execute_solve 走哪个 provider:model。
+def _resolve_execute_route(body: dict, request_id: str, stage: str = "execute_solve") -> str:
+    """根据路由规则动态决定某个 workflow 阶段走哪个 provider:model。
 
     复用标准路由引擎的 scenario/tool_routing/keyword_routing 规则，
-    如果路由引擎能匹配到规则，就用路由结果；否则用 workflow 配置的 execute_solve 兜底。
+    如果路由引擎能匹配到规则，就用其结果；否则按 stage 兜底到对应 workflow 列表首项。
     """
     global _routing_engine, _config
 
@@ -1073,13 +1139,17 @@ def _resolve_execute_route(body: dict, request_id: str) -> str:
         route_result = _routing_engine.route(tags)
         route_str = f"{route_result.provider}:{route_result.model}"
         logger.info(
-            f"[{request_id}] execute_solve routed to {route_str} "
+            f"[{request_id}] {stage} routed to {route_str} "
             f"via {route_result.matched_rule} ({route_result.matched_reason})"
         )
         return route_str
     except Exception as e:
-        logger.warning(f"[{request_id}] execute_solve routing failed ({e}), using workflow default")
-        return _config.workflow.get_execute_solve_single()
+        logger.warning(f"[{request_id}] {stage} routing failed ({e}), using workflow default")
+        if stage == "intention_analyze":
+            lst = _config.workflow.get_intention_analyze_list()
+        else:
+            lst = _config.workflow.get_execute_solve_list()
+        return lst[0] if lst else _config.workflow.get_execute_solve_single()
 
 
 def _get_stage_routes(stage: str, body: dict = None) -> tuple[list[str], str]:
@@ -1105,7 +1175,13 @@ def _get_stage_routes(stage: str, body: dict = None) -> tuple[list[str], str]:
             return [route] + fallback, "image"
     
     if stage == "intention_analyze":
-        return _config.workflow.get_intention_analyze_list(), "intention_analyze"
+        # 复用路由引擎：命中 scenario/tool_routing/keyword_routing 规则则用其结果
+        # （如 title 生成命中 "Generate the title" keyword 规则 -> deepseek-v4-pro），
+        # 否则 _resolve_execute_route 内部兜底到 workflow.intention_analyze 列表首项
+        resolved = _resolve_execute_route(body, request_id="", stage="intention_analyze")
+        wf_list = _config.workflow.get_intention_analyze_list()
+        fallback = [r for r in wf_list if r != resolved]
+        return [resolved] + fallback, "intention_analyze"
     elif stage == "chat_intention":
         return _config.workflow.get_chat_intention_list(), "chat_intention"
     elif stage == "analyze_plan":
@@ -1114,7 +1190,7 @@ def _get_stage_routes(stage: str, body: dict = None) -> tuple[list[str], str]:
         # 复用路由引擎：命中 scenario/tool_routing/keyword_routing 规则则用其结果
         # （如 ToolSearch 命中 tool_routing.cheap_tasks -> deepseek-v4-pro），
         # 否则 _resolve_execute_route 内部兜底到 workflow.execute_solve 列表首项
-        resolved = _resolve_execute_route(body, request_id="")
+        resolved = _resolve_execute_route(body, request_id="", stage="execute_solve")
         wf_list = _config.workflow.get_execute_solve_list()
         fallback = [r for r in wf_list if r != resolved]
         return [resolved] + fallback, "execute_solve"
@@ -1471,8 +1547,8 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
             _provider_last_request_time[prov_name] = time.time()
 
         try:
-            async with httpx.AsyncClient(timeout=prov_timeout) as client:
-                response = await client.post(prov_target_url, json=req_for_provider, headers=prov_headers)
+            async with contextlib.nullcontext(_http_client) as client:
+                response = await client.post(prov_target_url, json=req_for_provider, headers=prov_headers, timeout=prov_timeout)
                 response.raise_for_status()
                 resp_data = response.json()
 
@@ -1674,8 +1750,8 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
             logger.debug(f"[FallbackRouter] [REQ] [CURL]4 [{prov_name}] [{model}]: {req_file} (chars={len(json.dumps(req_for_provider, ensure_ascii=False))})\n{curl_cmd}")
 
         try:
-            async with httpx.AsyncClient(timeout=prov_timeout) as client:
-                async with client.stream("POST", prov_target_url, json=req_for_provider, headers=prov_headers) as response:
+            async with contextlib.nullcontext(_http_client) as client:
+                async with client.stream("POST", prov_target_url, json=req_for_provider, headers=prov_headers, timeout=prov_timeout) as response:
                     response.raise_for_status()
 
                     # Debug: 追踪响应内容用于日志
@@ -2014,7 +2090,10 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
             logger.error(f"[{request_id}] {error_msg}")
             yield _make_streaming_error_sse({"error": {"type": last_error_type, "message": error_msg}})
 
-    return StreamingResponse(workflow_stream_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        _wrap_with_concurrency(workflow_stream_generator, request_id),
+        media_type="text/event-stream",
+    )
 
 
 def _convert_openai_to_anthropic(body: dict) -> dict:

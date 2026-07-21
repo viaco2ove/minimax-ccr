@@ -173,10 +173,13 @@ python -m src.ccrg.main
 
 
 ## 运行环境 3428
-用于正式使用。作为隔离手段。不然边修改边用会很麻烦
+3428 用于正式使用。作为隔离手段。不然边修改边用会很麻烦
 D:\Users\viaco\PycharmProjects\minimax-ccr-run
+禁止直接修改minimax-ccr-run！修改的是 minimax-ccr！
+用户自己会更新minimax-ccr-run
 
 ## 调试开发环境 3429
 用于开发测试。源代码修改 。上传git.
 改好的代码复制到运行环境 3428
-由用户自己复制过去，不需要ai自动复制过去
+由用户自己复制过去minimax-ccr-run，不需要ai自动复制过去
+不允许ai修改minimax-ccr-run！！！
