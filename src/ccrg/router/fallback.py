@@ -44,19 +44,26 @@ def _calc_msgs_tokens(msgs: list) -> int:
 
 
 def _get_provider_max_context(route: str) -> int | None:
-    """从 route 字符串解析 provider 名称，返回其 max_context 配置"""
-    # route 格式: "provider:model"
-    if ":" in route:
-        prov_name = route.split(":")[0]
-        # 从 main.py 导入 _config
-        from .. import main as main_module
-        cfg = getattr(main_module, '_config', None)
-        if cfg and cfg.providers:
-            prov_config = cfg.providers.get(prov_name)
-            if prov_config:
-                # ProviderConfig 是 dataclass，capabilities 是属性而非 dict key
-                caps = prov_config.capabilities or {}
-                return caps.get("max_context")
+    """从 route 字符串解析 provider 名称，返回其 max_context 配置。
+
+    直接从 config.py 加载，绕开 main._config（避免 uvicorn reload 后 _config 被重置为 None。
+    """
+    if ":" not in route:
+        return None
+    prov_name = route.split(":")[0]
+    try:
+        from ..config import load_config
+        cfg = load_config()
+        if not cfg or not cfg.providers:
+            return None
+    except Exception:
+        return None
+    prov_config = cfg.providers.get(prov_name)
+    if not prov_config:
+        return None
+    caps = getattr(prov_config, 'capabilities', None)
+    if isinstance(caps, dict):
+        return caps.get("max_context")
     return None
 
 

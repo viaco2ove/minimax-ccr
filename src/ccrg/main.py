@@ -962,13 +962,13 @@ def _strip_unsupported_features(error_msg: str, req_for_provider: dict) -> dict:
                     result = dict(result)
                     result["tool_choice"] = {"type": "auto"}
 
-        # 确保 max_tokens 不超过 32K
+        # 确保 max_tokens 不超过 32K？ 降低一点 30000 或者保守一点 22000
         if "max_tokens" in result:
             try:
                 current_max = int(result["max_tokens"])
-                if current_max > 32000:
+                if current_max > 22000:
                     result = dict(result)
-                    result["max_tokens"] = 32000
+                    result["max_tokens"] = 22000
             except (ValueError, TypeError):
                 pass
 
