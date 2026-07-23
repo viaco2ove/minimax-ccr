@@ -112,7 +112,7 @@ class AnthropicAdapter(ProtocolAdapter):
 
             # 7f. 限制 max_tokens — MiniMax 等 provider 的 output budget 过大会导致
             #     context window 超限 (input + max_tokens > context_limit)
-            #     MiniMax 128K context，建议 max_tokens 上限 32K？设计测试是30000 左右!!!!
+            #     MiniMax 128K context，建议 max_tokens 上限 32K？实际测试是30000 左右!!!!
             # 改为 22000， 超过会报错： invalid params, context window exceeds limit (2013)"
             # 输入总 token + max_tokens ≤ 模型上下文窗口上限。 所以既不是不是32k 也不是3k 也不是 22000。
             # MAX_OUTPUT_TOKENS 只是 用于限制最大值。 capabilities.capabilities + default_params.max_tokens（MAX_OUTPUT_TOKENS） 要小于模型上下文窗口上限
