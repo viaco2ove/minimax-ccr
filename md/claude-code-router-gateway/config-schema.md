@@ -349,7 +349,7 @@ cost_tier 不直接决定路由，但可以用于：
         "match": [
           "Read", "Glob", "Grep",
           "Bash(git status)", "Bash(git diff)", "Bash(git log)",
-          "Bash(ls *)", "Bash(cat *)", "Bash(head *)"
+          "Bash(ls *)", "Bash(cat *)", "Bash(head *)","ToolSearch"
         ],
         "match_mode": "all",
         "route": "minimax:MiniMax-M2.7",
