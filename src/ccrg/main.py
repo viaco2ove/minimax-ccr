@@ -967,6 +967,7 @@ def _strip_unsupported_features(error_msg: str, req_for_provider: dict) -> dict:
         if "max_tokens" in result:
             try:
                 current_max = int(result["max_tokens"])
+                logger.debug(f"Routed to main 客户端 max_tokens : {result["max_tokens"]}")
                 if current_max > 22000:
                     result = dict(result)
                     result["max_tokens"] = 22000

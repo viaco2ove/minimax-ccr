@@ -8,6 +8,8 @@ from typing import Any
 
 from .base import ProtocolAdapter
 
+logger = __import__("logging").getLogger("ccrg")
+
 
 class AnthropicAdapter(ProtocolAdapter):
     """Anthropic 协议适配器
@@ -120,6 +122,7 @@ class AnthropicAdapter(ProtocolAdapter):
             if "max_tokens" in result:
                 try:
                     current_max = int(result["max_tokens"])
+                    logger.debug(f"Routed to transform_request  客户端 max_tokens : {result["max_tokens"]}")
                     if current_max > MAX_OUTPUT_TOKENS:
                         result["max_tokens"] = MAX_OUTPUT_TOKENS
                 except (ValueError, TypeError):
