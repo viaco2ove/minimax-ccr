@@ -315,16 +315,26 @@ def init_app(config_path: str | None = None) -> FastAPI:
     _translator_logger = logging.getLogger("ccrg.translator")
     _translator_logger.setLevel(log_level)
 
-    app = FastAPI(title="Claude Code Router Gateway")
 
-    @app.on_event("shutdown")
-    async def _shutdown_close_client():
-        """关闭全局 httpx 连接池，防止资源泄漏。"""
+    @contextlib.asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # ========== 启动时执行（替代 @app.on_event("startup")） ==========
         global _http_client
+        # 初始化你日志里的连接池参数
+        limits = httpx.Limits(max_connections=32, max_keepalive_connections=16)
+        _http_client = httpx.AsyncClient(limits=limits, timeout=600)
+        logger.info(f"Global httpx client initialized: max_connections=32, max_keepalive=16")
+
+        yield  # 此处分割，服务运行中
+
+        # ========== 关闭时执行（替代 @app.on_event("shutdown")） ==========
         if _http_client is not None:
             await _http_client.aclose()
             _http_client = None
             logger.info("Global httpx client closed")
+
+    # 实例化 FastAPI 绑定生命周期
+    app = FastAPI(lifespan=lifespan)
 
     @app.post("/v1/messages")
     async def handle_messages(request: Request):

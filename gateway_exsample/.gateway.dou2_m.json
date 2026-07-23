@@ -37,6 +37,30 @@
         "retry_on_status": [429, 500, 502, 503]
       }
     },
+    "minimax_long": {
+      "api_base_url": "https://api.minimaxi.com/anthropic",
+      "api_key": "xxx",
+      "protocol": "codeplan_anthropic",
+      "providers_adapter": "minimax",
+      "models": ["MiniMax-M3"],
+      "capabilities": {
+        "tool_use": true,
+        "streaming": true,
+        "thinking": true,
+        "vision": true,
+        "max_context": 322000
+      },
+      "per_request_delay_ms": 1500,
+      "cost_tier": "cheap",
+      "timeout_ms": 1200000,
+      "default_params": {
+        "max_tokens": 40096
+      },
+      "retry": {
+        "max_attempts": 3,
+        "retry_on_status": [429, 500, 502, 503]
+      }
+    },
     "xiaomi": {
       "api_base_url": "https://token-plan-cn.xiaomimimo.com/anthropic",
       "api_key": "xxx",
@@ -187,8 +211,8 @@
         "fallback": ["mmx:MiniMax-M2.7","doubao2:minimax-m3","minimax:MiniMax-M2.7","minimax:MiniMax-M2.7","doubao2:glm-5.2"]
       },
       "compact": {
-        "route": "minimax:MiniMax-M2.7",
-        "fallback": ["doubao2:minimax-m3","doubao2:glm-5.2"]
+        "route": "minimax_long:MiniMax-M3",
+        "fallback": ["minimax:MiniMax-M2.7","doubao2:glm-5.2","doubao2:deepseek-v4-pro"]
       }
     },
     "tool_routing": {
