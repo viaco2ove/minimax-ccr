@@ -963,6 +963,7 @@ def _strip_unsupported_features(error_msg: str, req_for_provider: dict) -> dict:
                     result["tool_choice"] = {"type": "auto"}
 
         # 确保 max_tokens 不超过 32K？ 降低一点 30000 或者保守一点 22000
+        # 输入总 token + max_tokens ≤ 模型上下文窗口上限
         if "max_tokens" in result:
             try:
                 current_max = int(result["max_tokens"])
