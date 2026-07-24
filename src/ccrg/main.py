@@ -1103,7 +1103,7 @@ def _get_adapter_for_provider(provider_name: str) -> ProtocolAdapter:
         return AnthropicAdapter()
 
 
-def _classify_request(request: dict) -> RequestTags:
+def _classify_request(request: dict, stage: str = None) -> RequestTags:
     """对请求进行分类"""
     global _config, _classifier_scenario, _classifier_tool
 
@@ -1111,10 +1111,11 @@ def _classify_request(request: dict) -> RequestTags:
     config_dict = _config.__dict__ if hasattr(_config, "__dict__") else {"routing": getattr(_config, "routing", {})}
     tags = _classifier_scenario.extract_tags(request, config_dict)
 
-    # Tool 类型分类
-    tool_types, tool_details = _classifier_tool.extract_tags(request)
-    tags.tool_types = tool_types
-    tags.tool_details = tool_details
+    # Tool 类型分类（intention_analyze 阶段跳过，避免 tool_routing 劫持）
+    if stage != "intention_analyze":
+        tool_types, tool_details = _classifier_tool.extract_tags(request)
+        tags.tool_types = tool_types
+        tags.tool_details = tool_details
 
     # 关键词分类
     keyword_rules = _config.routing.get("keyword_routing", {}).get("rules", []) if _config else []
@@ -1147,7 +1148,7 @@ def _resolve_execute_route(body: dict, request_id: str, stage: str = "execute_so
     global _routing_engine, _config
 
     try:
-        tags = _classify_request(body)
+        tags = _classify_request(body, stage=stage)
         route_result = _routing_engine.route(tags)
         route_str = f"{route_result.provider}:{route_result.model}"
         logger.info(
@@ -2036,14 +2037,11 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
             is_chat = (intent == "chat")
             is_user_initiated = _is_user_initiated_message(body)
             
-            # 工具循环回调（非用户主动输入）优先走 execute_solve，
-            # 避免 splitter 误判 intent=chat 把工具循环路由到 chat_intention
+            # 所有用户主动输入都必须先走 intention_analyze，确保路由正确
             if not is_user_initiated:
                 stage = "execute_solve"      # 工具回调 -> 直接执行
-            elif is_chat:
-                stage = "chat_intention"
             else:
-                stage = "intention_analyze"  # 首次用户输入 -> 意图分析
+                stage = "intention_analyze"  # 用户输入 -> 意图分析（每次都走）
             
             logger.info(f"[{request_id}] Workflow stage (auto-detected): {stage}")
         else:
