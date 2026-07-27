@@ -44,34 +44,48 @@ class UsageStats:
                     total_tokens INTEGER DEFAULT 0,
                     latency_ms REAL DEFAULT 0,
                     success INTEGER DEFAULT 1,
-                    route_rule TEXT DEFAULT ''
+                    route_rule TEXT DEFAULT '',
+                    attempt_id TEXT UNIQUE
                 )
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON usage_records(timestamp)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_provider ON usage_records(provider)")
+            # 迁移：旧表可能没有 attempt_id 列，先检查列是否存在再创建索引
+            try:
+                conn.execute("SELECT attempt_id FROM usage_records LIMIT 1")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_attempt ON usage_records(attempt_id)")
+            except sqlite3.OperationalError as ae:
+                # 列不存在，先添加列
+                conn.execute("ALTER TABLE usage_records ADD COLUMN attempt_id TEXT")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_attempt ON usage_records(attempt_id)")
 
     def record(self, provider: str, model: str, input_tokens: int, output_tokens: int,
-               latency_ms: float, success: bool, route_rule: str):
-        """记录一次请求"""
+               latency_ms: float, success: int, route_rule: str, attempt_id: str = None):
+        """记录一次请求（带 attempt_id 做唯一键，多次调用会覆盖）"""
         total_tokens = input_tokens + output_tokens
+        if not attempt_id:
+            attempt_id = f"{datetime.now().isoformat()}_{provider}_{model}_{route_rule}"
+        logger.debug(f"[USAGE_STATS] record: provider={provider}, model={model}, success={success}, attempt_id={attempt_id}")
         try:
             with self._lock:
                 conn = self._get_conn()
                 try:
                     conn.execute("""
-                        INSERT INTO usage_records 
-                        (timestamp, provider, model, input_tokens, output_tokens, total_tokens, latency_ms, success, route_rule)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT OR REPLACE INTO usage_records
+                        (timestamp, provider, model, input_tokens, output_tokens, total_tokens, latency_ms, success, route_rule, attempt_id)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         datetime.now().isoformat(),
                         provider, model, input_tokens, output_tokens, total_tokens,
-                        latency_ms, 1 if success else 0, route_rule
+                        latency_ms, success, route_rule, attempt_id
                     ))
                     conn.commit()
                 finally:
                     conn.close()
         except Exception as e:
-            logger.error(f"Failed to record usage stats: {e}")
+            import sys
+            logger.error(f"[USAGE_STATS] Failed to record: provider={provider}, model={model}, success={success}, route_rule={route_rule}, error={type(e).__name__}: {e}")
+            sys.stderr.write(f"[USAGE_STATS RECORD ERROR] provider={provider}, model={model}, error={type(e).__name__}: {e}\n")
 
     def get_range(self, start: datetime, end: datetime) -> dict:
         """获取指定时间范围的统计"""

@@ -627,7 +627,7 @@ async def _handle_request(request: Request) -> Response:
                             input_tokens=input_tokens,
                             output_tokens=output_tokens,
                             latency_ms=latency_ms,
-                            success=True,
+                            success=1,
                             route_rule=route_result.matched_rule,
                         )
 
@@ -689,7 +689,7 @@ async def _handle_request(request: Request) -> Response:
                                         provider=prov_name, model=model,
                                         input_tokens=usage.get("input_tokens", 0),
                                         output_tokens=usage.get("output_tokens", 0),
-                                        latency_ms=latency_ms, success=True,
+                                        latency_ms=latency_ms, success=1,
                                         route_rule=route_result.matched_rule,
                                     )
                                 logger.info(f"[{request_id}] Success from {prov_name} (stripped), latency={latency_ms/1000:.3f}s")
@@ -702,7 +702,7 @@ async def _handle_request(request: Request) -> Response:
                     provider=prov_name, model=model,
                     input_tokens=0, output_tokens=0,
                     latency_ms=(time.time() - start_time) * 1000,
-                    success=False, route_rule=route_result.matched_rule,
+                    success=0, route_rule=route_result.matched_rule,
                 )
             last_error = e
             continue
@@ -713,7 +713,7 @@ async def _handle_request(request: Request) -> Response:
                     provider=prov_name, model=model,
                     input_tokens=0, output_tokens=0,
                     latency_ms=(time.time() - start_time) * 1000,
-                    success=False, route_rule=route_result.matched_rule,
+                    success=0, route_rule=route_result.matched_rule,
                 )
             last_error = e
             continue
@@ -845,7 +845,7 @@ async def _handle_streaming_with_fallback(
                                 usage_stats.record(
                                     provider=prov_name, model=model,
                                     input_tokens=input_tokens, output_tokens=output_tokens,
-                                    latency_ms=latency_ms, success=True,
+                                    latency_ms=latency_ms, success=1,
                                     route_rule=matched_rule,
                                 )
                             return  # 成功完成，退出
@@ -899,7 +899,7 @@ async def _handle_streaming_with_fallback(
                 provider=providers_to_try[0][0] if providers_to_try else "unknown",
                 model=providers_to_try[0][1] if providers_to_try else "unknown",
                 input_tokens=0, output_tokens=0,
-                latency_ms=latency * 1000, success=False,
+                latency_ms=latency * 1000, success=0,
                 route_rule=matched_rule,
             )
 
@@ -1579,7 +1579,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                                 provider=prov_name, model=model,
                                 input_tokens=0, output_tokens=0,
                                 latency_ms=(time.time() - start_time) * 1000,
-                                success=False, route_rule=f"workflow.{step_name}",
+                                success=0, route_rule=f"workflow.{step_name}",
                             )
                         return {"error": {"type": "empty_response", "message": f"{prov_name} returned empty content"}}, False
 
@@ -1591,7 +1591,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                         input_tokens=usage.get("input_tokens", 0),
                         output_tokens=usage.get("output_tokens", 0),
                         latency_ms=(time.time() - start_time) * 1000,
-                        success=True, route_rule=f"workflow.{step_name}",
+                        success=1, route_rule=f"workflow.{step_name}",
                     )
 
                 # Debug: log response preview
@@ -1656,7 +1656,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                             provider=prov_name, model=model,
                             input_tokens=0, output_tokens=0,
                             latency_ms=(time.time() - start_time) * 1000,
-                            success=False, route_rule=f"workflow.{step_name}",
+                            success=0, route_rule=f"workflow.{step_name}",
                         )
                     return {
                         "error": {
@@ -1677,7 +1677,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                     provider=prov_name, model=model,
                     input_tokens=0, output_tokens=0,
                     latency_ms=(time.time() - start_time) * 1000,
-                    success=False, route_rule=f"workflow.{step_name}",
+                    success=0, route_rule=f"workflow.{step_name}",
                 )
             return {"error": {"type": "workflow_error", "message": str(e)}}, False
         except Exception as e:
@@ -1687,7 +1687,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                     provider=prov_name, model=model,
                     input_tokens=0, output_tokens=0,
                     latency_ms=(time.time() - start_time) * 1000,
-                    success=False, route_rule=f"workflow.{step_name}",
+                    success=0, route_rule=f"workflow.{step_name}",
                 )
             return {"error": {"type": "workflow_error", "message": str(e)}}, False
 
@@ -1695,10 +1695,12 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
     local_req_body = [dict(body)]  # 用列表包装以便在闭包中修改
     retried_strip = False  # 本次调用是否已尝试过剥离
 
-    async def call_provider_streaming(route_str: str, messages: list, step_name: str) -> AsyncGenerator[bytes, None]:
+    async def call_provider_streaming(route_str: str, messages: list, step_name: str, attempt_id: str = None) -> AsyncGenerator[bytes, None]:
         """流式调用 provider，实时 yield 每个 chunk"""
         nonlocal local_req_body, retried_strip
         prov_name, model = parse_provider_model(route_str)
+        if not attempt_id:
+            attempt_id = f"{request_id}_{prov_name}_{step_name}"
         prov_config = _registry.get(prov_name)
         if not prov_config:
             yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'type': 'api_error', 'message': f'Unknown provider: {prov_name}'}}, ensure_ascii=False)}\n\n".encode("utf-8")
@@ -1761,6 +1763,16 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 json.dump(req_for_provider, f, ensure_ascii=False)
             curl_cmd = _make_curl_cmd(prov_target_url, f"logs/req/{req_file.name}", prov_config)
             logger.debug(f"[FallbackRouter] [REQ] [CURL]4 [{prov_name}] [{model}]: {req_file} (chars={len(json.dumps(req_for_provider, ensure_ascii=False))})\n{curl_cmd}")
+
+        # 请求发出时先记录（pending 状态，success=2 表示未完成）
+        if _usage_stats:
+            _usage_stats.record(
+                provider=prov_name, model=model,
+                input_tokens=0, output_tokens=0,
+                latency_ms=0,
+                success=2, route_rule=f"workflow.{step_name}",
+                attempt_id=attempt_id,
+            )
 
         try:
             async with contextlib.nullcontext(_http_client) as client:
@@ -1851,7 +1863,8 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                     provider=prov_name, model=model,
                     input_tokens=input_tokens, output_tokens=output_tokens,
                     latency_ms=(time.time() - start_time) * 1000,
-                    success=True, route_rule=f"workflow.{step_name}",
+                    success=1, route_rule=f"workflow.{step_name}",
+                    attempt_id=attempt_id,
                 )
             logger.debug(f"[{request_id}] ← [{prov_name}] stream completed, step={step_name}")
             logger.debug(f"[FallbackRouter] [RESULT] [REPONSE] [{prov_name}] step={step_name}, status=200 OK, chunks={resp_chunk_count}, first={resp_first_chunk or 'none'}, last={resp_last_chunk or 'none'}, input_tokens={input_tokens}, output_tokens={output_tokens}")
@@ -1932,7 +1945,8 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                             provider=prov_name, model=model,
                             input_tokens=0, output_tokens=0,
                             latency_ms=(time.time() - start_time) * 1000,
-                            success=False, route_rule=f"workflow.{step_name}",
+                            success=0, route_rule=f"workflow.{step_name}",
+                            attempt_id=attempt_id,
                         )
                     yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'type': 'invalid_request_error', 'message': user_msg}}, ensure_ascii=False)}\n\n".encode("utf-8")
                     return
@@ -1967,7 +1981,8 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                         provider=prov_name, model=model,
                         input_tokens=0, output_tokens=0,
                         latency_ms=(time.time() - start_time) * 1000,
-                        success=False, route_rule=f"workflow.{step_name}",
+                        success=0, route_rule=f"workflow.{step_name}",
+                        attempt_id=attempt_id,
                     )
                 raise RuntimeError(f"{prov_name} streaming returned 400: {err_msg[:300]}") from e
 
@@ -1980,7 +1995,8 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                         provider=prov_name, model=model,
                         input_tokens=0, output_tokens=0,
                         latency_ms=(time.time() - start_time) * 1000,
-                        success=False, route_rule=f"workflow.{step_name}",
+                        success=0, route_rule=f"workflow.{step_name}",
+                        attempt_id=attempt_id,
                     )
                 raise RuntimeError(f"{prov_name} streaming returned 429 rate limit") from e
 
@@ -1992,7 +2008,8 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                     provider=prov_name, model=model,
                     input_tokens=0, output_tokens=0,
                     latency_ms=(time.time() - start_time) * 1000,
-                    success=False, route_rule=f"workflow.{step_name}",
+                    success=0, route_rule=f"workflow.{step_name}",
+                    attempt_id=attempt_id,
                 )
             raise RuntimeError(f"{prov_name} streaming returned {e.response.status_code}: {error_text[:300]}") from e
 
@@ -2004,7 +2021,8 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                     provider=prov_name, model=model,
                     input_tokens=0, output_tokens=0,
                     latency_ms=(time.time() - start_time) * 1000,
-                    success=False, route_rule=f"workflow.{step_name}",
+                    success=0, route_rule=f"workflow.{step_name}",
+                    attempt_id=attempt_id,
                 )
             raise
 
@@ -2077,8 +2095,10 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
 
         async def wrapped_call(route: str, msgs: list, step_name: str):
             nonlocal last_error, last_error_type
+            prov_name, _ = parse_provider_model(route)
+            attempt_id = f"{request_id}_{prov_name}_{step_name}"
             try:
-                async for chunk in call_provider_streaming(route, msgs, step_name):
+                async for chunk in call_provider_streaming(route, msgs, step_name, attempt_id):
                     yield chunk
             except Exception as e:
                 last_error = e
