@@ -50,7 +50,7 @@ class UsageStats:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON usage_records(timestamp)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_provider ON usage_records(provider)")
-            # 迁移：旧表可能没有 attempt_id 列，先检查列是否存在再创建索引
+            # 迁移：旧表可能没有 attempt_id / matched_keyword / matched_rule 列，先检查列是否存在再创建索引
             try:
                 conn.execute("SELECT attempt_id FROM usage_records LIMIT 1")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_attempt ON usage_records(attempt_id)")
@@ -58,26 +58,38 @@ class UsageStats:
                 # 列不存在，先添加列
                 conn.execute("ALTER TABLE usage_records ADD COLUMN attempt_id TEXT")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_attempt ON usage_records(attempt_id)")
+            # 迁移：matched_keyword / matched_rule（记录命中关键词与路由规则）
+            for col in ("matched_keyword", "matched_rule"):
+                try:
+                    conn.execute(f"SELECT {col} FROM usage_records LIMIT 1")
+                except sqlite3.OperationalError:
+                    conn.execute(f"ALTER TABLE usage_records ADD COLUMN {col} TEXT DEFAULT ''")
 
     def record(self, provider: str, model: str, input_tokens: int, output_tokens: int,
-               latency_ms: float, success: int, route_rule: str, attempt_id: str = None):
-        """记录一次请求（带 attempt_id 做唯一键，多次调用会覆盖）"""
+               latency_ms: float, success: int, route_rule: str, attempt_id: str = None,
+               matched_keyword: str = "", matched_rule: str = ""):
+        """记录一次请求（带 attempt_id 做唯一键，多次调用会覆盖）
+
+        matched_keyword: 命中的关键词（keyword_routing / splitter 等）
+        matched_rule: 命中的路由规则名（scenario/tool_routing/keyword_routing/semantic_routing 等）
+        """
         total_tokens = input_tokens + output_tokens
         if not attempt_id:
             attempt_id = f"{datetime.now().isoformat()}_{provider}_{model}_{route_rule}"
-        logger.debug(f"[USAGE_STATS] record: provider={provider}, model={model}, success={success}, attempt_id={attempt_id}")
+        logger.debug(f"[USAGE_STATS] record: provider={provider}, model={model}, success={success}, attempt_id={attempt_id}, matched_keyword={matched_keyword}, matched_rule={matched_rule}")
         try:
             with self._lock:
                 conn = self._get_conn()
                 try:
                     conn.execute("""
                         INSERT OR REPLACE INTO usage_records
-                        (timestamp, provider, model, input_tokens, output_tokens, total_tokens, latency_ms, success, route_rule, attempt_id)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        (timestamp, provider, model, input_tokens, output_tokens, total_tokens, latency_ms, success, route_rule, attempt_id, matched_keyword, matched_rule)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         datetime.now().isoformat(),
                         provider, model, input_tokens, output_tokens, total_tokens,
-                        latency_ms, success, route_rule, attempt_id
+                        latency_ms, success, route_rule, attempt_id,
+                        matched_keyword, matched_rule,
                     ))
                     conn.commit()
                 finally:

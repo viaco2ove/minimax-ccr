@@ -645,7 +645,7 @@ async def _handle_request(request: Request) -> Response:
 
             # 400 且错误信息表明模型不支持某功能 → 剥离该功能并重试
             if e.response.status_code == 400 and prov_name not in retried_with_stripped:
-                stripped = _strip_unsupported_features(error_body, body)
+                stripped = _strip_unsupported_features(error_body, body, prov_config.protocol)
                 if stripped is not body:
                     retried_with_stripped.add(prov_name)
                     logger.info(f"[{request_id}] {prov_name} doesn't support some features, stripping and retrying")
@@ -860,7 +860,7 @@ async def _handle_streaming_with_fallback(
 
                 # 400 且错误信息表明模型不支持某功能 → 剥离该功能并重试
                 if e.response.status_code == 400 and prov_name not in retried_with_stripped:
-                    stripped = _strip_unsupported_features(error_body, original_body)
+                    stripped = _strip_unsupported_features(error_body, original_body, prov_config.protocol)
                     if stripped is not original_body:
                         retried_with_stripped.add(prov_name)
                         logger.info(f"[{request_id}] {prov_name} doesn't support some features, stripping and retrying")
@@ -909,7 +909,7 @@ async def _handle_streaming_with_fallback(
     )
 
 
-def _strip_unsupported_features(error_msg: str, req_for_provider: dict) -> dict:
+def _strip_unsupported_features(error_msg: str, req_for_provider: dict, protocol: str = "") -> dict:
     """根据 upstream 400 错误信息和当前请求，剥离可能导致 400 的功能
 
     直接基于请求字段进行剥离，适用于 call_provider_streaming 的重试逻辑。
@@ -917,6 +917,9 @@ def _strip_unsupported_features(error_msg: str, req_for_provider: dict) -> dict:
     - thinking 字段可能导致 "thinking not supported" 错误
     - output_config 可能导致 "output_config.effort" 相关错误
     - tool_choice 的 any/tool 类型可能不被支持
+
+    protocol 参数应传 provider 配置里的真实 protocol（如 "codeplan_anthropic"），
+    注意：请求体本身不含 protocol 字段，所以不能从 req_for_provider 里取。
     """
     result = dict(req_for_provider)
 
@@ -956,7 +959,7 @@ def _strip_unsupported_features(error_msg: str, req_for_provider: dict) -> dict:
 
     # 对于 codeplan_anthropic 协议，额外做预防性剥离
     # 因为 400 错误可能是由 provider 不支持的 Claude Code 特有参数导致的
-    protocol = req_for_provider.get("protocol", "")
+    # 注意：protocol 来自 provider 配置，不能从请求体里取（请求体没有这个字段）
     if protocol in ("codeplan_anthropic", "mmx"):
         # 预防性剥离 thinking（MiniMax 等 provider 的 codeplan 接口可能不支持）
         if "thinking" in result:
@@ -1054,6 +1057,144 @@ def _strip_empty_and_unsupported_blocks(body: dict) -> dict:
     if changed:
         return dict(body, messages=new_messages)
     return body
+
+
+def _pick_vision_route() -> str | None:
+    """从 routing.scenarios.image 的 route+fallback 里取第一个 vision:true 的 provider:model。
+
+    不修改 routing 配置，仅用于 image 预处理时选择一个能看图的 provider。
+    """
+    global _config, _registry
+    if not _config:
+        return None
+    image_cfg = _config.routing.get("scenarios", {}).get("image", {})
+    candidates = []
+    if image_cfg.get("route"):
+        candidates.append(image_cfg["route"])
+    candidates.extend(image_cfg.get("fallback", []))
+    for route in candidates:
+        if ":" not in route:
+            continue
+        prov_name, _ = route.split(":", 1)
+        prov = _registry.get(prov_name)
+        if prov and prov.capabilities.get("vision", False):
+            return route
+    return None
+
+
+def _collect_image_blocks(messages: list) -> list[tuple[int, int, dict]]:
+    """收集所有 image 内容块的位置。
+
+    返回 [(msg_index, block_index, image_block), ...]，遍历全部消息（含历史）。
+    支持 Anthropic 原生格式 {"type":"image","source":{...}}。
+    """
+    result = []
+    for mi, msg in enumerate(messages):
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for bi, block in enumerate(content):
+            if isinstance(block, dict) and block.get("type") == "image":
+                result.append((mi, bi, block))
+    return result
+
+
+async def _describe_image_block(image_block: dict, vision_route: str, request_id: str) -> str:
+    """调用 vision provider 把单个 image 块转成文字描述。
+
+    失败时返回 "[image]" 占位（与原 strip 行为一致），不阻断主流程。
+    """
+    global _http_client, _registry
+    prov_name, model = vision_route.split(":", 1)
+    prov_config = _registry.get(prov_name)
+    if not prov_config:
+        logger.warning(f"[{request_id}] image preprocess: vision provider {prov_name} not found")
+        return "[image]"
+
+    # 构建一个只含该图片 + 描述指令的最小请求
+    describe_req = {
+        "model": model,
+        "max_tokens": 1024,
+        "stream": False,
+        "messages": [{
+            "role": "user",
+            "content": [
+                image_block,
+                {"type": "text", "text": "请用中文简洁客观地描述这张图片的内容，包括可见的文字、UI 元素、图表数据等关键信息。不要发表观点，只描述你看到的。"},
+            ],
+        }],
+    }
+    prov_adapter = _get_adapter_for_provider(prov_name)
+    req_for_provider = prov_adapter.transform_request(describe_req, _provider_config_to_dict(prov_config))
+    req_for_provider["model"] = model
+    target_url = prov_adapter.get_target_url(_provider_config_to_dict(prov_config), model)
+    if not target_url.startswith("http"):
+        target_url = f"http://{target_url}"
+    headers = _build_provider_headers(prov_config)
+    timeout = (prov_config.timeout_ms or _config.server.get("timeout_ms", 600000)) / 1000
+
+    try:
+        async with contextlib.nullcontext(_http_client) as client:
+            resp = await client.post(target_url, json=req_for_provider, headers=headers, timeout=timeout)
+            resp.raise_for_status()
+            data = resp.json()
+            # 提取 text 内容
+            content = data.get("content", [])
+            texts = []
+            if isinstance(content, list):
+                for b in content:
+                    if isinstance(b, dict) and b.get("type") == "text":
+                        texts.append(b.get("text", ""))
+            desc = "".join(texts).strip()
+            if not desc:
+                logger.warning(f"[{request_id}] image preprocess: vision returned empty, using [image]")
+                return "[image]"
+            logger.info(f"[{request_id}] image preprocess: described image via {vision_route} ({len(desc)} chars)")
+            return f"[图片内容：{desc}]"
+    except Exception as e:
+        logger.warning(f"[{request_id}] image preprocess: vision call failed ({e}), using [image]")
+        return "[image]"
+
+
+async def _preprocess_images_for_provider(messages: list, prov_config, request_id: str) -> list:
+    """若目标 provider 不支持 vision 且 messages 含图片，先把图片转成文字描述。
+
+    返回处理后的 messages（若无图或 provider 支持 vision，原样返回）。
+    在 transform_request 之前调用，保证 vision:false 的 provider（如 glm-5.2）
+    收到的是图片文字描述而非裸 image 块，避免 400 "Model only support text input"。
+    """
+    # provider 支持 vision -> 无需预处理
+    caps = prov_config.capabilities if prov_config else {}
+    if caps.get("vision", False):
+        return messages
+
+    image_locs = _collect_image_blocks(messages)
+    if not image_locs:
+        return messages
+
+    vision_route = _pick_vision_route()
+    if not vision_route:
+        logger.info(f"[{request_id}] image preprocess: no vision provider available, leaving {len(image_locs)} images as-is")
+        return messages
+
+    logger.info(f"[{request_id}] image preprocess: {len(image_locs)} image(s) -> vision route {vision_route}")
+    # 逐个描述（串行，避免并发触发 rate limit）
+    # 用浅拷贝 + 原地替换 block，保持 messages 结构
+    new_messages = [dict(m) for m in messages]
+    for mi, msg in enumerate(new_messages):
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        new_content = list(content)
+        changed = False
+        for bi, block in enumerate(new_content):
+            if isinstance(block, dict) and block.get("type") == "image":
+                desc = await _describe_image_block(block, vision_route, request_id)
+                new_content[bi] = {"type": "text", "text": desc}
+                changed = True
+        if changed:
+            msg["content"] = new_content
+    return new_messages
 
 
 def _provider_config_to_dict(provider: ProviderConfig) -> dict:
@@ -1165,52 +1306,195 @@ def _resolve_execute_route(body: dict, request_id: str, stage: str = "execute_so
         return lst[0] if lst else _config.workflow.get_execute_solve_single()
 
 
-def _get_stage_routes(stage: str, body: dict = None) -> tuple[list[str], str]:
+def _get_stage_routes(stage: str, body: dict = None) -> tuple[list[str], str, dict]:
     """根据 workflow 阶段获取路由列表和步骤名
-    
+
     Args:
         stage: workflow 阶段名称（intention_analyze/chat_intention/analyze_plan/execute_solve）
         body: 原始请求体（用于 scenario 检测）
-    
+
     Returns:
-        (route_list, step_name): 路由列表（包含 fallback）和步骤名
+        (route_list, step_name, route_meta): 路由列表（包含 fallback）、步骤名、路由元信息
+        route_meta = {"matched_rule": str, "matched_keyword": str}
     """
-    global _config
-    
-    # 优先检查 scenario：如果有图片，直接走 mmx
+    global _config, _routing_engine
+
+    def _meta(rule: str, kws: list[str] = None) -> dict:
+        return {"matched_rule": rule or "", "matched_keyword": ",".join(kws) if kws else ""}
+
+    # 优先检查 scenario：如果有图片，直接走 image 场景路由
     if body:
-        tags = _classify_request(body)
-        if tags.scenario == "image":
+        try:
+            tags = _classify_request(body)
+        except Exception:
+            tags = None
+        if tags and tags.scenario == "image":
             image_config = _config.routing.get("scenarios", {}).get("image", {})
             route = image_config.get("route", "mmx:MiniMax-M2.7")
             fallback = image_config.get("fallback", [])
             logger.info(f"Image scenario detected, routing to {route}")
-            return [route] + fallback, "image"
-    
+            return [route] + fallback, "image", _meta("scenario.image", tags.keywords)
+
+    # 优先用 splitter 决策（用户语义判断），splitter 没命中时再走场景/工具/关键词规则
+    splitter_decision = _try_splitter_route(body)
+    if splitter_decision:
+        resolved, meta = splitter_decision
+        wf_list = _get_workflow_list(stage)
+        fallback = [r for r in wf_list if r != resolved]
+        return [resolved] + fallback, stage, meta
+
     if stage == "intention_analyze":
-        # 复用路由引擎：命中 scenario/tool_routing/keyword_routing 规则则用其结果
-        # （如 title 生成命中 "Generate the title" keyword 规则 -> deepseek-v4-pro），
-        # 否则 _resolve_execute_route 内部兜底到 workflow.intention_analyze 列表首项
-        resolved = _resolve_execute_route(body, request_id="", stage="intention_analyze")
+        # splitter 没命中，回退到路由引擎（scenario/tool_routing/keyword_routing）
+        resolved, meta = _resolve_route_with_meta(body, "intention_analyze")
         wf_list = _config.workflow.get_intention_analyze_list()
         fallback = [r for r in wf_list if r != resolved]
-        return [resolved] + fallback, "intention_analyze"
+        return [resolved] + fallback, "intention_analyze", meta
     elif stage == "chat_intention":
-        return _config.workflow.get_chat_intention_list(), "chat_intention"
+        return _config.workflow.get_chat_intention_list(), "chat_intention", _meta("workflow.chat_intention")
     elif stage == "analyze_plan":
-        return _config.workflow.get_analyze_plan_list(), "analyze_plan"
+        return _config.workflow.get_analyze_plan_list(), "analyze_plan", _meta("workflow.analyze_plan")
     elif stage == "execute_solve":
-        # 复用路由引擎：命中 scenario/tool_routing/keyword_routing 规则则用其结果
-        # （如 ToolSearch 命中 tool_routing.cheap_tasks -> deepseek-v4-pro），
-        # 否则 _resolve_execute_route 内部兜底到 workflow.execute_solve 列表首项
-        resolved = _resolve_execute_route(body, request_id="", stage="execute_solve")
+        resolved, meta = _resolve_route_with_meta(body, "execute_solve")
         wf_list = _config.workflow.get_execute_solve_list()
         fallback = [r for r in wf_list if r != resolved]
-        return [resolved] + fallback, "execute_solve"
+        return [resolved] + fallback, "execute_solve", meta
     else:
         # 未知阶段，默认 execute_solve
         logger.warning(f"Unknown workflow_stage: {stage}, defaulting to execute_solve")
-        return _config.workflow.get_execute_solve_list(), "execute_solve"
+        return _config.workflow.get_execute_solve_list(), "execute_solve", _meta("workflow.execute_solve")
+
+
+def _get_workflow_list(stage: str) -> list[str]:
+    """根据 stage 取对应 workflow 列表。"""
+    global _config
+    if stage == "intention_analyze":
+        return _config.workflow.get_intention_analyze_list()
+    elif stage == "chat_intention":
+        return _config.workflow.get_chat_intention_list()
+    elif stage == "analyze_plan":
+        return _config.workflow.get_analyze_plan_list()
+    elif stage == "execute_solve":
+        return _config.workflow.get_execute_solve_list()
+    return _config.workflow.get_execute_solve_list()
+
+
+def _try_splitter_route(body: dict) -> tuple[str, dict] | None:
+    """尝试用 splitter（语义/关键词/LLM）决策决定首项路由。
+
+    splitter 真正命中关键词时（matched_reason 不含 no_match/no_keywords）
+    才使用 splitter 决策，避免每次都走语义路径。
+    若 splitter 选择的 provider 不满足请求能力（vision/thinking），走降级链；
+    降级链都不满足则返回 None，让上层 fallback 到 _resolve_route_with_meta。
+    """
+    global _workflow_splitter, _config, _registry
+    if not _workflow_splitter or not body:
+        return None
+    try:
+        decision = _workflow_splitter.detect(body)
+    except Exception as e:
+        logger.warning(f"splitter detect failed: {e}")
+        return None
+
+    reason = decision.matched_reason or ""
+    # splitter 没命中关键词（no_match / no_keywords_matched），不优先用
+    if "no_match" in reason or "no_keywords" in reason:
+        logger.debug(f"splitter not matched ({reason}), fallback to routing engine")
+        return None
+
+    route_str = decision.route or ""
+    if ":" not in route_str:
+        return None
+    prov_name, model = route_str.split(":", 1)
+
+    # 能力检查：若 splitter 选的 provider 满足 vision/thinking 要求，直接用；
+    # 否则尝试 splitter.fallback 中的降级链
+    try:
+        tags = _classify_request(body)
+    except Exception:
+        tags = None
+
+    candidates = [route_str]
+    if decision.fallback:
+        candidates.extend(decision.fallback)
+
+    chosen = None
+    for cand in candidates:
+        if ":" not in cand:
+            continue
+        p_name, _ = cand.split(":", 1)
+        prov = _registry.get(p_name)
+        if not prov:
+            continue
+        caps = prov.capabilities or {}
+        if tags and tags.has_images and not caps.get("vision", False):
+            continue
+        if tags and tags.has_thinking and not caps.get("thinking", False):
+            continue
+        chosen = cand
+        break
+
+    if not chosen:
+        logger.info(f"splitter route {route_str} (fallback={decision.fallback}) cannot satisfy capabilities, fallback to routing engine")
+        return None
+
+    # 解析 matched_keyword
+    matched_keyword = ""
+    if decision.matched_rule == "keyword_routing":
+        import re as _re
+        m = _re.search(r"keywords=(\[.*?\])", reason)
+        if m:
+            try:
+                kws = eval(m.group(1), {"__builtins__": {}}, {})
+                matched_keyword = ",".join(kws) if isinstance(kws, list) else str(kws)
+            except Exception:
+                matched_keyword = reason
+
+    meta = {
+        "matched_rule": decision.matched_rule or "",
+        "matched_keyword": matched_keyword,
+    }
+    logger.info(f"splitter decision: {chosen} via {decision.matched_rule} ({reason})")
+    return chosen, meta
+
+
+def _resolve_route_with_meta(body: dict, stage: str) -> tuple[str, dict]:
+    """与 _resolve_execute_route 类似，但额外返回路由元信息（matched_rule / matched_keyword）。
+
+    Returns:
+        (route_str, route_meta)
+    """
+    global _routing_engine, _config
+    try:
+        tags = _classify_request(body, stage=stage)
+        route_result = _routing_engine.route(tags)
+        route_str = f"{route_result.provider}:{route_result.model}"
+        logger.info(
+            f"[{stage}] routed to {route_str} "
+            f"via {route_result.matched_rule} ({route_result.matched_reason})"
+        )
+        matched_rule = route_result.matched_rule or ""
+        # 只有 keyword_routing 真正决定路由时，才记录命中的关键词
+        # matched_reason 形如 "keyword=['优化', '设计']"，从中解析实际命中的词
+        matched_keyword = ""
+        if matched_rule == "keyword_routing" and route_result.matched_reason:
+            import re as _re
+            m = _re.search(r"keyword=(\[.*?\])", route_result.matched_reason)
+            if m:
+                try:
+                    kws = eval(m.group(1), {"__builtins__": {}}, {})
+                    matched_keyword = ",".join(kws) if isinstance(kws, list) else str(kws)
+                except Exception:
+                    matched_keyword = route_result.matched_reason
+        meta = {"matched_rule": matched_rule, "matched_keyword": matched_keyword}
+        return route_str, meta
+    except Exception as e:
+        logger.warning(f"{stage} routing failed ({e}), using workflow default")
+        if stage == "intention_analyze":
+            lst = _config.workflow.get_intention_analyze_list()
+        else:
+            lst = _config.workflow.get_execute_solve_list()
+        route_str = lst[0] if lst else _config.workflow.get_execute_solve_single()
+        return route_str, {"matched_rule": f"workflow.{stage}", "matched_keyword": ""}
 
 
 def _is_user_initiated_message(body: dict) -> bool:
@@ -1526,6 +1810,8 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
 
         # 构建请求
         req_body = dict(body)
+        # image 预处理：若目标 provider 不支持 vision 且含图片，先把图片转成文字描述
+        messages = await _preprocess_images_for_provider(messages, prov_config, request_id)
         req_body["messages"] = messages
         req_body["model"] = model
 
@@ -1694,6 +1980,9 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
     # 本次调用的上下文（用于重试逻辑）
     local_req_body = [dict(body)]  # 用列表包装以便在闭包中修改
     retried_strip = False  # 本次调用是否已尝试过剥离
+    # 当前请求的路由元信息（matched_keyword / matched_rule），由 workflow_stream_generator 填充，
+    # call_provider_streaming 读取后写入 usage_records。用 dict 便于在闭包间共享且可变。
+    _route_meta = {"matched_keyword": "", "matched_rule": ""}
 
     async def call_provider_streaming(route_str: str, messages: list, step_name: str, attempt_id: str = None) -> AsyncGenerator[bytes, None]:
         """流式调用 provider，实时 yield 每个 chunk"""
@@ -1711,6 +2000,9 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
         # 构建请求（使用可能已更新的 local_req_body）
         req_body = local_req_body[0]
         req_body = dict(req_body)
+        # image 预处理：若目标 provider 不支持 vision 且含图片，先把图片转成文字描述
+        # 避免 glm-5.2 等 text-only 模型收到 image 块返回 400 "Model only support text input"
+        messages = await _preprocess_images_for_provider(messages, prov_config, request_id)
         req_body["messages"] = messages
         req_body["model"] = model
         req_body["stream"] = is_streaming
@@ -1772,6 +2064,8 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 latency_ms=0,
                 success=2, route_rule=f"workflow.{step_name}",
                 attempt_id=attempt_id,
+                matched_keyword=_route_meta["matched_keyword"],
+                matched_rule=_route_meta["matched_rule"],
             )
 
         try:
@@ -1865,6 +2159,8 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                     latency_ms=(time.time() - start_time) * 1000,
                     success=1, route_rule=f"workflow.{step_name}",
                     attempt_id=attempt_id,
+                    matched_keyword=_route_meta["matched_keyword"],
+                    matched_rule=_route_meta["matched_rule"],
                 )
             logger.debug(f"[{request_id}] ← [{prov_name}] stream completed, step={step_name}")
             logger.debug(f"[FallbackRouter] [RESULT] [REPONSE] [{prov_name}] step={step_name}, status=200 OK, chunks={resp_chunk_count}, first={resp_first_chunk or 'none'}, last={resp_last_chunk or 'none'}, input_tokens={input_tokens}, output_tokens={output_tokens}")
@@ -1947,6 +2243,8 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                             latency_ms=(time.time() - start_time) * 1000,
                             success=0, route_rule=f"workflow.{step_name}",
                             attempt_id=attempt_id,
+                            matched_keyword=_route_meta["matched_keyword"],
+                            matched_rule=_route_meta["matched_rule"],
                         )
                     yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'type': 'invalid_request_error', 'message': user_msg}}, ensure_ascii=False)}\n\n".encode("utf-8")
                     return
@@ -1954,7 +2252,7 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 # 非 context 超限的 400 错误（如 invalid params）
                 # 抛出异常让 FallbackRouter 重试
                 if not retried_strip:
-                    stripped = _strip_unsupported_features(err_msg, req_for_provider)
+                    stripped = _strip_unsupported_features(err_msg, req_for_provider, prov_config.protocol)
                     if stripped is not req_for_provider:
                         retried_strip = True
                         logger.info(f"[{request_id}] {prov_name} doesn't support some features, stripping and retrying")
@@ -1969,6 +2267,18 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                             logger.debug(f"[FallbackRouter] [REQ] [CURL]6 [{prov_name}]: {req_file} (chars={len(json.dumps(stripped, ensure_ascii=False))})\n{curl_cmd}")
                         # 更新 local_req_body 用于下次重试
                         local_req_body[0] = stripped
+                        # 剥离后跳到下一个 provider 重试前，先终结本次 pending 记录
+                        # （否则 success=2 会一直留着，因为下面的 record(success=0) 不会被执行）
+                        if _usage_stats:
+                            _usage_stats.record(
+                                provider=prov_name, model=model,
+                                input_tokens=0, output_tokens=0,
+                                latency_ms=(time.time() - start_time) * 1000,
+                                success=0, route_rule=f"workflow.{step_name}",
+                                attempt_id=attempt_id,
+                                matched_keyword=_route_meta["matched_keyword"],
+                                matched_rule=_route_meta["matched_rule"],
+                            )
                         # 抛出异常让 FallbackRouter 重试
                         raise Exception(f"{prov_name} stripped unsupported features, will retry")
 
@@ -1983,6 +2293,8 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                         latency_ms=(time.time() - start_time) * 1000,
                         success=0, route_rule=f"workflow.{step_name}",
                         attempt_id=attempt_id,
+                        matched_keyword=_route_meta["matched_keyword"],
+                        matched_rule=_route_meta["matched_rule"],
                     )
                 raise RuntimeError(f"{prov_name} streaming returned 400: {err_msg[:300]}") from e
 
@@ -1997,6 +2309,8 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                         latency_ms=(time.time() - start_time) * 1000,
                         success=0, route_rule=f"workflow.{step_name}",
                         attempt_id=attempt_id,
+                        matched_keyword=_route_meta["matched_keyword"],
+                        matched_rule=_route_meta["matched_rule"],
                     )
                 raise RuntimeError(f"{prov_name} streaming returned 429 rate limit") from e
 
@@ -2010,6 +2324,8 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                     latency_ms=(time.time() - start_time) * 1000,
                     success=0, route_rule=f"workflow.{step_name}",
                     attempt_id=attempt_id,
+                    matched_keyword=_route_meta["matched_keyword"],
+                    matched_rule=_route_meta["matched_rule"],
                 )
             raise RuntimeError(f"{prov_name} streaming returned {e.response.status_code}: {error_text[:300]}") from e
 
@@ -2023,6 +2339,8 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                     latency_ms=(time.time() - start_time) * 1000,
                     success=0, route_rule=f"workflow.{step_name}",
                     attempt_id=attempt_id,
+                    matched_keyword=_route_meta["matched_keyword"],
+                    matched_rule=_route_meta["matched_rule"],
                 )
             raise
 
@@ -2066,7 +2384,9 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
             logger.info(f"[{request_id}] Workflow stage (from metadata): {stage}")
 
         # 3. 根据阶段选择路由和 fallback
-        route_list, step_name = _get_stage_routes(stage, body)
+        route_list, step_name, route_meta = _get_stage_routes(stage, body)
+        _route_meta["matched_keyword"] = route_meta.get("matched_keyword", "")
+        _route_meta["matched_rule"] = route_meta.get("matched_rule", "")
 
         msgs = body.get("messages", [])
 
@@ -2083,7 +2403,9 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
         is_compact = _is_compact_request(body)
         if is_compact:
             logger.info(f"[{request_id}] /compact request → direct pass-through, overriding stage to execute_solve")
-            route_list, step_name = _get_stage_routes("execute_solve", body)
+            route_list, step_name, route_meta = _get_stage_routes("execute_solve", body)
+            _route_meta["matched_keyword"] = route_meta.get("matched_keyword", "")
+            _route_meta["matched_rule"] = route_meta.get("matched_rule", "")
 
         # 4. 流式调用 provider（带 fallback）
         router = FallbackRouter(route_list, request_id, step_name)
