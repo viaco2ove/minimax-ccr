@@ -1,4 +1,5 @@
 # Workbuddy 的配置 两种方式反复横跳？
+models.json
 v1
 ```
 {

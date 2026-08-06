@@ -1335,20 +1335,18 @@ def _get_stage_routes(stage: str, body: dict = None) -> tuple[list[str], str, di
             logger.info(f"Image scenario detected, routing to {route}")
             return [route] + fallback, "image", _meta("scenario.image", tags.keywords)
 
-    # 优先用 splitter 决策（用户语义判断），splitter 没命中时再走场景/工具/关键词规则
+    # intention_analyze 直接用 workflow 配置，跳过 splitter 和路由引擎
+    if stage == "intention_analyze":
+        wf_list = _config.workflow.get_intention_analyze_list()
+        return wf_list, "intention_analyze", _meta("workflow.intention_analyze")
+
+    # 其他 stage：优先用 splitter 决策（用户语义判断），splitter 没命中时再走场景/工具/关键词规则
     splitter_decision = _try_splitter_route(body)
     if splitter_decision:
         resolved, meta = splitter_decision
         wf_list = _get_workflow_list(stage)
         fallback = [r for r in wf_list if r != resolved]
         return [resolved] + fallback, stage, meta
-
-    if stage == "intention_analyze":
-        # splitter 没命中，回退到路由引擎（scenario/tool_routing/keyword_routing）
-        resolved, meta = _resolve_route_with_meta(body, "intention_analyze")
-        wf_list = _config.workflow.get_intention_analyze_list()
-        fallback = [r for r in wf_list if r != resolved]
-        return [resolved] + fallback, "intention_analyze", meta
     elif stage == "chat_intention":
         return _config.workflow.get_chat_intention_list(), "chat_intention", _meta("workflow.chat_intention")
     elif stage == "analyze_plan":
