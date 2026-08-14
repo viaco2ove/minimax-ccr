@@ -1471,18 +1471,26 @@ def _resolve_route_with_meta(body: dict, stage: str) -> tuple[str, dict]:
             f"via {route_result.matched_rule} ({route_result.matched_reason})"
         )
         matched_rule = route_result.matched_rule or ""
-        # 只有 keyword_routing 真正决定路由时，才记录命中的关键词
-        # matched_reason 形如 "keyword=['优化', '设计']"，从中解析实际命中的词
         matched_keyword = ""
-        if matched_rule == "keyword_routing" and route_result.matched_reason:
-            import re as _re
-            m = _re.search(r"keyword=(\[.*?\])", route_result.matched_reason)
-            if m:
-                try:
-                    kws = eval(m.group(1), {"__builtins__": {}}, {})
-                    matched_keyword = ",".join(kws) if isinstance(kws, list) else str(kws)
-                except Exception:
-                    matched_keyword = route_result.matched_reason
+        if route_result.matched_reason:
+            if matched_rule == "keyword_routing":
+                # keyword_routing: matched_reason 形如 "keyword=['优化', '设计']"
+                import re as _re
+                m = _re.search(r"keyword=(\[.*?\])", route_result.matched_reason)
+                if m:
+                    try:
+                        kws = eval(m.group(1), {"__builtins__": {}}, {})
+                        matched_keyword = ",".join(kws) if isinstance(kws, list) else str(kws)
+                    except Exception:
+                        matched_keyword = route_result.matched_reason
+            elif matched_rule.startswith("tool_routing."):
+                # tool_routing: matched_reason 形如 "tool=Read()"
+                import re as _re
+                m = _re.search(r"tool=(\w+)", route_result.matched_reason)
+                if m:
+                    matched_keyword = m.group(1)
+            else:
+                matched_keyword = route_result.matched_reason
         meta = {"matched_rule": matched_rule, "matched_keyword": matched_keyword}
         return route_str, meta
     except Exception as e:
@@ -1981,13 +1989,16 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
     # 当前请求的路由元信息（matched_keyword / matched_rule），由 workflow_stream_generator 填充，
     # call_provider_streaming 读取后写入 usage_records。用 dict 便于在闭包间共享且可变。
     _route_meta = {"matched_keyword": "", "matched_rule": ""}
+    attempt_index = 0  # 每次调用递增，确保每条记录唯一
 
     async def call_provider_streaming(route_str: str, messages: list, step_name: str, attempt_id: str = None) -> AsyncGenerator[bytes, None]:
         """流式调用 provider，实时 yield 每个 chunk"""
-        nonlocal local_req_body, retried_strip
+        nonlocal local_req_body, retried_strip, attempt_index
         prov_name, model = parse_provider_model(route_str)
         if not attempt_id:
-            attempt_id = f"{request_id}_{prov_name}_{step_name}"
+            base_id = f"{request_id}_{prov_name}_{step_name}"
+            attempt_id = f"{base_id}_{attempt_index}"
+            attempt_index += 1
         prov_config = _registry.get(prov_name)
         if not prov_config:
             yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'type': 'api_error', 'message': f'Unknown provider: {prov_name}'}}, ensure_ascii=False)}\n\n".encode("utf-8")
