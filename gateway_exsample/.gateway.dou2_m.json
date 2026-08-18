@@ -106,7 +106,7 @@
       "api_base_url": "https://ark.cn-beijing.volces.com/api/coding",
       "api_key": "xxx",
       "protocol": "codeplan_anthropic",
-      "models": ["ark-code-latest","glm-5.2","Kimi-K2.6","doubao-seed-2.0-code","doubao-seed-2.0-pro","doubao-seed-2.0-lite","minimax-m3"],
+      "models": ["ark-code-latest","glm-5.3","Kimi-K2.6","doubao-seed-2.0-code","doubao-seed-2.0-pro","doubao-seed-2.0-lite","minimax-m3"],
       "capabilities": {
         "tool_use": true,
         "streaming": true,
@@ -127,7 +127,7 @@
       "api_base_url": "https://ark.cn-beijing.volces.com/api/coding",
       "api_key": "xxx",
       "protocol": "codeplan_anthropic",
-      "models": ["ark-code-latest","glm-5.2","Kimi-K2.6","doubao-seed-2.0-code","doubao-seed-2.0-pro","doubao-seed-2.0-lite","minimax-m3"],
+      "models": ["ark-code-latest","glm-5.3","Kimi-K2.6","doubao-seed-2.0-code","doubao-seed-2.0-pro","doubao-seed-2.0-lite","minimax-m3"],
       "capabilities": {
         "tool_use": true,
         "streaming": true,
@@ -191,28 +191,28 @@
     "scenarios": {
       "background": {
         "route": "minimax:MiniMax-M2.7",
-        "fallback": ["doubao2:glm-5.2","minimax:MiniMax-M2.7"]
+        "fallback": ["doubao2:glm-5.3","minimax:MiniMax-M2.7"]
       },
       "think": {
-        "route": "doubao2:glm-5.2",
-        "fallback": [ "doubao2:glm-5.2","minimax:MiniMax-M2.7", "minimax:MiniMax-M2.7"]
+        "route": "doubao2:glm-5.3",
+        "fallback": [ "doubao2:glm-5.3","minimax:MiniMax-M2.7", "minimax:MiniMax-M2.7"]
       },
       "long_context": {
-        "route": "doubao2:glm-5.2",
-        "fallback": [ "minimax:MiniMax-M2.7","doubao2:minimax-m3","doubao2:glm-5.2"],
+        "route": "doubao2:glm-5.3",
+        "fallback": [ "minimax:MiniMax-M2.7","doubao2:minimax-m3","doubao2:glm-5.3"],
         "threshold": 80000
       },
       "web_search": {
-        "route": "doubao2:glm-5.2",
-        "fallback": ["doubao2:minimax-m3","minimax:MiniMax-M2.7", "doubao2:glm-5.2","doubao2:minimax-m3"]
+        "route": "doubao2:glm-5.3",
+        "fallback": ["doubao2:minimax-m3","minimax:MiniMax-M2.7", "doubao2:glm-5.3","doubao2:minimax-m3"]
       },
       "image": {
-        "route": "doubao2:glm-5.2",
-        "fallback": ["mmx:MiniMax-M2.7","doubao2:minimax-m3","minimax:MiniMax-M2.7","minimax:MiniMax-M2.7","doubao2:glm-5.2"]
+        "route": "doubao2:glm-5.3",
+        "fallback": ["mmx:MiniMax-M2.7","doubao2:minimax-m3","minimax:MiniMax-M2.7","minimax:MiniMax-M2.7","doubao2:glm-5.3"]
       },
       "compact": {
         "route": "minimax_long:MiniMax-M3",
-        "fallback": ["minimax:MiniMax-M2.7","doubao2:glm-5.2","doubao2:deepseek-v4-pro"]
+        "fallback": ["minimax:MiniMax-M2.7","doubao2:glm-5.3","doubao2:deepseek-v4-pro"]
       }
     },
     "tool_routing": {
@@ -224,19 +224,19 @@
         ],
         "match_mode": "any",
         "route": "minimax:MiniMax-M2.7",
-        "fallback": ["doubao2:glm-5.2","doubao2:minimax-m3"]
+        "fallback": ["doubao2:glm-5.3","doubao2:minimax-m3"]
       },
       "standard_tasks": {
         "match": ["Edit", "Write", "NotebookEdit","MultiEdit"],
         "match_mode": "any",
         "route": "minimax:MiniMax-M2.7",
-        "fallback": ["doubao2:glm-5.2","doubao2:minimax-m3"]
+        "fallback": ["doubao2:glm-5.3","doubao2:minimax-m3"]
       },
       "complex_tasks": {
         "match": ["Agent", "TaskCreate", "EnterPlanMode"],
         "match_mode": "any",
-        "route": "doubao2:glm-5.2",
-        "fallback": [ "minimax:MiniMax-M2.7", "doubao2:minimax-m3","doubao2:minimax-m3","doubao2:glm-5.2"]
+        "route": "doubao2:glm-5.3",
+        "fallback": [ "minimax:MiniMax-M2.7", "doubao2:minimax-m3","doubao2:minimax-m3","doubao2:glm-5.3"]
       }
     },
     "keyword_routing": {
@@ -246,15 +246,15 @@
             "拆分", "合并", "升级", "改造","分析","设计","处理","你个垃圾","这他妈","白痴","[deep]"],
           "match_mode": "any",
           "scope": "user_message",
-          "route": "doubao2:glm-5.2",
-          "fallback": [ "doubao2:glm-5.2","minimax:MiniMax-M2.7", "doubao2:minimax-m3","doubao2:minimax-m3"]
+          "route": "doubao2:glm-5.3",
+          "fallback": [ "doubao2:glm-5.3","minimax:MiniMax-M2.7", "doubao2:minimax-m3","doubao2:minimax-m3"]
         },
         {
           "keywords": ["/compact", "compact"],
           "match_mode": "any",
           "scope": "user_message",
           "route": "minimax:MiniMax-M2.7",
-          "fallback": ["doubao2:minimax-m3","minimax:MiniMax-M2.7","doubao2:glm-5.2"]
+          "fallback": ["doubao2:minimax-m3","minimax:MiniMax-M2.7","doubao2:glm-5.3"]
         }
       ]
     },
@@ -280,10 +280,10 @@
   },
   "workflow": {
     "enabled": true,
-    "intention_analyze": ["doubao2:glm-5.2","minimax:MiniMax-M2.7", "doubao2:minimax-m3"],
-    "problem_analyze": ["doubao2:glm-5.2","minimax:MiniMax-M2.7"],
-    "chat_intention": [ "minimax:MiniMax-M2.7", "doubao2:glm-5.2","doubao2:minimax-m3"],
-    "analyze_plan": ["doubao2:glm-5.2","minimax:MiniMax-M2.7"],
-    "execute_solve": ["minimax:MiniMax-M2.7","doubao2:minimax-m3","doubao2:glm-5.2"]
+    "intention_analyze": ["doubao2:glm-5.3","minimax:MiniMax-M2.7", "doubao2:minimax-m3"],
+    "problem_analyze": ["doubao2:glm-5.3","minimax:MiniMax-M2.7"],
+    "chat_intention": [ "minimax:MiniMax-M2.7", "doubao2:glm-5.3","doubao2:minimax-m3"],
+    "analyze_plan": ["doubao2:glm-5.3","minimax:MiniMax-M2.7"],
+    "execute_solve": ["minimax:MiniMax-M2.7","doubao2:minimax-m3","doubao2:glm-5.3"]
   }
 }
