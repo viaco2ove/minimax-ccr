@@ -3,10 +3,13 @@ Anthropic 协议适配器 — 透传 + 微调。
 """
 
 import json
+import logging
 import re
 from typing import Any
 
 from .base import ProtocolAdapter
+
+logger = logging.getLogger("ccrg")
 
 logger = __import__("logging").getLogger("ccrg")
 
@@ -72,8 +75,10 @@ class AnthropicAdapter(ProtocolAdapter):
                 thinking = result["thinking"]
                 # 如果 thinking 类型不是 "enabled"，直接删除整个 thinking
                 if thinking.get("type") not in ("enabled", "disabled"):
+                    logger.debug(f"[transform_request] strip thinking: type={thinking.get('type')} not in (enabled, disabled), thinking={thinking}")
                     del result["thinking"]
                 elif thinking.get("type") == "disabled":
+                    logger.debug(f"[transform_request] strip thinking: type=disabled")
                     del result["thinking"]
                 elif "budget_tokens" in thinking:
                     # budget_tokens 可能不被支持，移除

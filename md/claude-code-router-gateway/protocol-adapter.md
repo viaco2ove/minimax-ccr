@@ -5,6 +5,7 @@ date: 2026-05-11
 ---
 
 # 协议适配器设计
+protocol:chat_openai/codeplan_anthropic/mmx/codeplan_openai
 
 ## 1. 问题
 

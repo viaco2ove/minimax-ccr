@@ -2171,6 +2171,21 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                     matched_keyword=_route_meta["matched_keyword"],
                     matched_rule=_route_meta["matched_rule"],
                 )
+            # chunks=0 表示返回了空响应（200 OK 但 body 为空），视为失败，触发 fallback
+            if resp_chunk_count == 0:
+                logger.warning(f"[{request_id}] {prov_name} returned empty response (chunks=0), triggering fallback")
+                if _usage_stats:
+                    _usage_stats.record(
+                        provider=prov_name, model=model,
+                        input_tokens=0, output_tokens=0,
+                        latency_ms=(time.time() - start_time) * 1000,
+                        success=0, route_rule=f"workflow.{step_name}",
+                        attempt_id=attempt_id,
+                        matched_keyword=_route_meta["matched_keyword"],
+                        matched_rule=_route_meta["matched_rule"],
+                    )
+                raise RuntimeError(f"{prov_name} returned empty response (chunks=0)")
+
             logger.debug(f"[{request_id}] ← [{prov_name}] stream completed, step={step_name}")
             logger.debug(f"[FallbackRouter] [RESULT] [REPONSE] [{prov_name}] step={step_name}, status=200 OK, chunks={resp_chunk_count}, first={resp_first_chunk or 'none'}, last={resp_last_chunk or 'none'}, input_tokens={input_tokens}, output_tokens={output_tokens}")
 
