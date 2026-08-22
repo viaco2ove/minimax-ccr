@@ -13,3 +13,4 @@ logs/
 /sse_test_out.txt
 /keywords.json
 /local_models/
+/dist/

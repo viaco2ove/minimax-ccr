@@ -1503,6 +1503,82 @@ def _resolve_route_with_meta(body: dict, stage: str) -> tuple[str, dict]:
         return route_str, {"matched_rule": f"workflow.{stage}", "matched_keyword": ""}
 
 
+_WORKFLOW_STAGES = {"intention_analyze", "execute_solve", "analyze_plan", "execute_write"}
+
+
+def _extract_stage_from_tag(body: dict) -> str | None:
+    """从 assistant 消息中的 {workflow_stage:xxx} tag 提取当前 workflow 阶段。
+
+    CCRG 在每个阶段完成后，会在响应末尾注入 {workflow_stage:<next_stage>} 可见 tag。
+    Claude Code 会将其保留在对话历史中，下一个请求时 CCRG 从最后一条 assistant 消息中提取。
+    以最后面的 workflow_stage 为准。
+    """
+    import re
+    messages = body.get("messages", [])
+
+    for msg in reversed(messages):
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content", [])
+        if not isinstance(content, list):
+            break
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text", "")
+                matches = re.findall(r'\{workflow_stage:(\w+)\}', text)
+                if matches:
+                    # 以最后一个为准
+                    stage = matches[-1]
+                    if stage in _WORKFLOW_STAGES:
+                        return stage
+        break  # 只检查最后一条 assistant 消息
+    return None
+
+
+def _infer_stage_from_context(body: dict) -> str:
+    """从 conversation 内容推断当前 workflow 阶段。
+
+    推断优先级：
+    1. [CCRG:STAGE:xxx] tag（最可靠，由 CCRG 注入）
+    2. tool_use 模式推断（兜底）
+
+    Claude Code 的 workflow 流程：
+    1. intention_analyze: 分析用户意图（用户主动输入）
+    2. execute_solve: 执行解决方案（工具回调）
+    3. analyze_plan: 分析执行结果（工具回调）
+    4. execute_write: 写入结果（工具回调）
+    """
+    # 优先：从 tag 提取
+    stage = _extract_stage_from_tag(body)
+    if stage:
+        return stage
+
+    # 兜底：从 tool_use 模式推断
+    messages = body.get("messages", [])
+
+    last_assistant = None
+    for msg in reversed(messages):
+        if msg.get("role") == "assistant":
+            last_assistant = msg
+            break
+
+    if not last_assistant:
+        return "execute_solve"
+
+    # 检查是否有 tool_use（说明 assistant 调用了工具，应该进入下一个阶段）
+    has_tool_use = False
+    if isinstance(last_assistant.get("content"), list):
+        for block in last_assistant["content"]:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                has_tool_use = True
+                break
+
+    if has_tool_use:
+        return "analyze_plan"
+
+    return "execute_solve"
+
+
 def _is_user_initiated_message(body: dict) -> bool:
     """判断请求是否由用户主动输入触发（而非工具调用循环的后续请求）。
 
@@ -2396,13 +2472,13 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
             intent = routing_decision.intent
             is_chat = (intent == "chat")
             is_user_initiated = _is_user_initiated_message(body)
-            
-            # 所有用户主动输入都必须先走 intention_analyze，确保路由正确
-            if not is_user_initiated:
-                stage = "execute_solve"      # 工具回调 -> 直接执行
-            else:
+
+            if is_user_initiated:
                 stage = "intention_analyze"  # 用户输入 -> 意图分析（每次都走）
-            
+            else:
+                # 工具回调：从 conversation 内容推断当前阶段
+                stage = _infer_stage_from_context(body)
+
             logger.info(f"[{request_id}] Workflow stage (auto-detected): {stage}")
         else:
             logger.info(f"[{request_id}] Workflow stage (from metadata): {stage}")
@@ -2458,6 +2534,19 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
             async for chunk in router.call_provider_streaming(wrapped_call, msgs):
                 all_failed = False
                 yield chunk
+            # 阶段完成后，注入 {workflow_stage:xxx} tag 告诉 CCRG 下一步该设什么 stage
+            # Claude Code 会将可见文本保留在对话历史中，下一次请求时 CCRG 从 assistant 消息提取
+            _stage_hints = {
+                "intention_analyze": "execute_solve",
+                "execute_solve": "analyze_plan",
+                "analyze_plan": "execute_write",
+            }
+            next_stage = _stage_hints.get(step_name)
+            if next_stage:
+                tag = f"\n\n{{workflow_stage:{next_stage}}}"
+                tag_sse = f"data: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': tag}})}\n\n"
+                yield tag_sse.encode()
+                yield b"data: [DONE]\n\n"
             # 正常返回，不走下面的 error 处理
             return
 

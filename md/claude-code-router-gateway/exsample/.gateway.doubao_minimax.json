@@ -56,7 +56,7 @@
       "api_base_url": "https://ark.cn-beijing.volces.com/api/coding",
       "api_key": "xxx",
       "protocol": "codeplan_anthropic",
-      "models": ["ark-code-latest","glm-5.3","Kimi-K2.6","doubao-seed-2.0-code"],
+      "models": ["ark-code-latest","glm-5.2","Kimi-K2.6","doubao-seed-2.0-code"],
       "capabilities": {
         "tool_use": true,
         "streaming": true,

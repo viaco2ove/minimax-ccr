@@ -85,7 +85,7 @@
 	  "api_key":"xxxx",
       "api_key":"xxxx",
       "protocol": "codeplan_anthropic",
-      "models": ["ark-code-latest","glm-5.3","Kimi-K2.6","doubao-seed-2.0-code","doubao-seed-2.0-pro","doubao-seed-2.0-lite","minimax-m3","deepseek-v4-pro"],
+      "models": ["ark-code-latest","glm-5.2","Kimi-K2.6","doubao-seed-2.0-code","doubao-seed-2.0-pro","doubao-seed-2.0-lite","minimax-m3","deepseek-v4-pro"],
       "capabilities": {
         "tool_use": true,
         "streaming": true,
@@ -108,7 +108,7 @@
 	  "api_key":"xxxx",
       "api_key":"xxxx",
       "protocol": "codeplan_anthropic",
-      "models": ["ark-code-latest","glm-5.3","Kimi-K2.6","doubao-seed-2.0-code","doubao-seed-2.0-pro","doubao-seed-2.0-lite","minimax-m3","deepseek-v4-flash","deepseek-v4-pro"],
+      "models": ["ark-code-latest","glm-5.2","Kimi-K2.6","doubao-seed-2.0-code","doubao-seed-2.0-pro","doubao-seed-2.0-lite","minimax-m3","deepseek-v4-flash","deepseek-v4-pro"],
       "capabilities": {
         "tool_use": true,
         "streaming": true,
@@ -168,32 +168,32 @@
     }
   },
   "routing": {
-    "default":"doubao2:glm-5.3",
+    "default":"doubao2:glm-5.2",
     "scenarios": {
       "background": {
-        "route": "doubao2:glm-5.3",
-        "fallback": ["doubao2:glm-5.3","doubao2:deepseek-v4-pro"]
+        "route": "doubao2:glm-5.2",
+        "fallback": ["doubao2:glm-5.2","doubao2:deepseek-v4-pro"]
       },
       "think": {
-        "route":"doubao2:glm-5.3",
-        "fallback": ["doubao2:glm-5.3","doubao2:deepseek-v4-pro"]
+        "route":"doubao2:glm-5.2",
+        "fallback": ["doubao2:glm-5.2","doubao2:deepseek-v4-pro"]
       },
       "long_context": {
-        "route":"doubao2:glm-5.3",
-        "fallback": ["doubao2:glm-5.3","doubao2:deepseek-v4-pro"],
+        "route":"doubao2:glm-5.2",
+        "fallback": ["doubao2:glm-5.2","doubao2:deepseek-v4-pro"],
         "threshold": 80000
       },
       "web_search": {
-        "route":"doubao2:glm-5.3",
-        "fallback": ["doubao2:glm-5.3","doubao2:deepseek-v4-pro"]
+        "route":"doubao2:glm-5.2",
+        "fallback": ["doubao2:glm-5.2","doubao2:deepseek-v4-pro"]
       },
       "image": {
         "route": "doubao2:deepseek-v4-pro",
-        "fallback": ["mmx:MiniMax-M2.7","minimax:MiniMax-M3","minimax:MiniMax-M2.7","doubao2:glm-5.3","doubao2:deepseek-v4-pro"]
+        "fallback": ["mmx:MiniMax-M2.7","minimax:MiniMax-M3","minimax:MiniMax-M2.7","doubao2:glm-5.2","doubao2:deepseek-v4-pro"]
       },
       "compact": {
-        "route":"doubao2:glm-5.3",
-        "fallback": ["doubao2:glm-5.3","doubao2:deepseek-v4-pro"]
+        "route":"doubao2:glm-5.2",
+        "fallback": ["doubao2:glm-5.2","doubao2:deepseek-v4-pro"]
       }
     },
     "tool_routing": {
@@ -205,18 +205,18 @@
         ],
         "match_mode": "any",
         "route":"doubao2:deepseek-v4-pro",
-        "fallback": ["doubao2:minimax-m3","doubao2:glm-5.3","doubao2:deepseek-v4-pro"]
+        "fallback": ["doubao2:minimax-m3","doubao2:glm-5.2","doubao2:deepseek-v4-pro"]
       },
       "standard_tasks": {
         "match": ["Edit", "Write", "NotebookEdit","MultiEdit"],
         "match_mode": "any",
         "route":"doubao2:deepseek-v4-pro",
-        "fallback": ["doubao2:minimax-m3","doubao2:glm-5.3","doubao2:minimax-m3","doubao2:deepseek-v4-pro"]
+        "fallback": ["doubao2:minimax-m3","doubao2:glm-5.2","doubao2:minimax-m3","doubao2:deepseek-v4-pro"]
       },
       "complex_tasks": {
         "match": ["Agent", "TaskCreate", "EnterPlanMode"],
         "match_mode": "any",
-        "route":"doubao2:glm-5.3",
+        "route":"doubao2:glm-5.2",
         "fallback": ["doubao2:minimax-m3","doubao2:minimax-m3","doubao2:deepseek-v4-pro"]
       }
     },
@@ -227,15 +227,15 @@
             "拆分", "合并", "升级", "改造","分析","设计","处理","你个垃圾","这他妈","白痴","[deep]"],
           "match_mode": "any",
           "scope": "user_message",
-          "route":"doubao2:glm-5.3",
-          "fallback": ["doubao2:glm-5.3","doubao2:deepseek-v4-pro"]
+          "route":"doubao2:glm-5.2",
+          "fallback": ["doubao2:glm-5.2","doubao2:deepseek-v4-pro"]
         },
         {
           "keywords": ["/compact", "compact"],
           "match_mode": "any",
           "scope": "user_message",
-          "route":"doubao2:glm-5.3",
-          "fallback": ["doubao2:glm-5.3","doubao2:deepseek-v4-pro"]
+          "route":"doubao2:glm-5.2",
+          "fallback": ["doubao2:glm-5.2","doubao2:deepseek-v4-pro"]
         }
       ]
     },
@@ -255,16 +255,16 @@
       "enabled": true,
       "provider": "minimax",
       "track_usage": true,
-      "fallback_on_exhaust": "doubao2:glm-5.3",
+      "fallback_on_exhaust": "doubao2:glm-5.2",
       "warning_threshold": 0.2
     }
   },
   "workflow": {
     "enabled": true,
-    "intention_analyze": ["doubao2:glm-5.3","doubao2:deepseek-v4-pro"],
-    "problem_analyze": ["doubao2:glm-5.3","doubao2:deepseek-v4-pro"],
-    "chat_intention": ["doubao2:glm-5.3","doubao2:deepseek-v4-pro"],
-    "analyze_plan": ["doubao2:glm-5.3","doubao2:deepseek-v4-pro"],
-    "execute_solve": ["doubao2:glm-5.3","doubao2:deepseek-v4-pro"]
+    "intention_analyze": ["doubao2:glm-5.2","doubao2:deepseek-v4-pro"],
+    "problem_analyze": ["doubao2:glm-5.2","doubao2:deepseek-v4-pro"],
+    "chat_intention": ["doubao2:glm-5.2","doubao2:deepseek-v4-pro"],
+    "analyze_plan": ["doubao2:glm-5.2","doubao2:deepseek-v4-pro"],
+    "execute_solve": ["doubao2:glm-5.2","doubao2:deepseek-v4-pro"]
   }
 }

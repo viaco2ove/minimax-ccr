@@ -15,6 +15,10 @@ src/ccrg/classifier/__init__.py
 src/ccrg/classifier/keyword.py
 src/ccrg/classifier/scenario.py
 src/ccrg/classifier/tool_type.py
+src/ccrg/log/log_controller.py
+src/ccrg/mcp_server/__init__.py
+src/ccrg/mcp_server/__main__.py
+src/ccrg/mcp_server/server.py
 src/ccrg/middleware/__init__.py
 src/ccrg/protocol/__init__.py
 src/ccrg/protocol/anthropic_adapter.py
@@ -30,5 +34,14 @@ src/ccrg/router/__init__.py
 src/ccrg/router/engine.py
 src/ccrg/router/fallback.py
 src/ccrg/router/req_cli_pre.py
+src/ccrg/splitter/__init__.py
+src/ccrg/splitter/base.py
+src/ccrg/splitter/factory.py
+src/ccrg/splitter/keyword.py
+src/ccrg/splitter/llm.py
+src/ccrg/splitter/semantic.py
+src/ccrg/splitter/semantic_local.py
+src/ccrg/splitter/workflow.py
 src/ccrg/translator/__init__.py
 src/ccrg/translator/openai_translator.py
+src/ccrg/translator/sse_client.py

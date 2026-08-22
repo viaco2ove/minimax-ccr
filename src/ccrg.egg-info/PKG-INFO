@@ -11,7 +11,7 @@ Requires-Dist: uvicorn>=0.20.0
 
 # Claude Code Router Gateway (CCRG)
 
-极薄的 AI 请求网关，支持在同一 agent loop 内根据请求特征动态路由到不同 provider。
+极薄的 AI 请求网关，支持在同一 agent loop 内根据请求特征动态路由到不同 provider。1
 
 ![img.png](img.png)
 
@@ -23,6 +23,8 @@ Requires-Dist: uvicorn>=0.20.0
 CCRG 不用当「大脑」，只当「指挥 + 分流管道」
 扁平化命中机制。内部不做流程，而是摊开分流。
 去命中providers，但是claude code cli 能流式响应的效果。
+
+[README.md](gateway_exsample/README.md)
 ### 尽量让每个 provider 都能流式响应。
 claude code cli 一次请求，CCRG 也只发出一个请求（除了fallback 和失败重试的的等兜底）
 
@@ -39,8 +41,9 @@ minimax 2.7 太笨了，但是便宜
 ## 快速开始
 
 ### 1. 安装依赖
-
+[READEME.venv.md](md/code/READEME.venv.md).venv
 ```bash
+.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
@@ -131,6 +134,14 @@ cd currpath
 
   如果 3458 还有进程，用 taskkill /F /PID <PID> 杀掉即可。
 
+## 运行 on PyCharm
+[debug.Pycharm.md](md/code/debug.Pycharm.md)
+## 日志标签
+[logtag.md](md/code/logtag.md)
+
+## 接入方案
+[claude_code_cli.md](md/claude-code-router-gateway/api/claude_code_cli.md)
+[workbuddy.md](md/claude-code-router-gateway/api/workbuddy.md)
 
 ## License
 
