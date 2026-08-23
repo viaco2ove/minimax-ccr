@@ -44,6 +44,8 @@ class SemanticSplitterLocal(Splitter):
             return self._keyword_fallback(body)
 
         model = self._load_model()
+        if model is None:
+            return self._keyword_fallback(body)
         user_emb = model.encode(text)
 
         # 遍历所有关键词，计算相似度，找出命中的关键词
@@ -176,7 +178,12 @@ class SemanticSplitterLocal(Splitter):
             import os
             import time
             import shutil
-            from sentence_transformers import SentenceTransformer
+            try:
+                from sentence_transformers import SentenceTransformer
+            except ImportError:
+                logger.warning("[SemanticSplitterLocal] sentence_transformers not available, semantic routing disabled")
+                self._model = None
+                return
             start = time.time()
 
             # 检查本地缓存是否存在

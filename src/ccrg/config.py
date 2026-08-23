@@ -51,12 +51,20 @@ def resolve_config_env_vars(config: Any) -> Any:
 def load_config(config_path: str | Path | None = None) -> GatewayConfig:
     """加载并校验配置文件"""
     if config_path is None:
-        # 优先从工作目录找（exe 打包后 __file__ 指向临时目录）
-        cwd_config = Path.cwd() / ".gateway.json"
-        if cwd_config.exists():
-            config_path = cwd_config
-        else:
-            # 回退到源码目录（开发时）
+        import sys
+        # 1. exe 同目录（打包后 PyInstaller 会把 datas 复制到这里）
+        exe_dir = Path(sys.executable).parent if getattr(sys, 'frozen', False) else None
+        if exe_dir:
+            exe_config = exe_dir / ".gateway.json"
+            if exe_config.exists():
+                config_path = exe_config
+        # 2. 当前工作目录（开发时）
+        if config_path is None:
+            cwd_config = Path.cwd() / ".gateway.json"
+            if cwd_config.exists():
+                config_path = cwd_config
+        # 3. 源码目录（开发时）
+        if config_path is None:
             config_path = Path(__file__).parent.parent.parent / ".gateway.json"
     else:
         config_path = Path(config_path)
