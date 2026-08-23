@@ -38,7 +38,9 @@ class SemanticSplitterLocal(Splitter):
 
     def detect(self, body: dict) -> RoutingDecision:
         """基于语义向量匹配关键词并返回路由决策"""
-        logger.debug(f"[SemanticSplitterLocal] body: {body}")
+        import traceback
+        msgs = body.get("messages", [])
+        logger.debug(f"[SemanticSplitterLocal] body: {len(msgs)} messages")
         text = self._extract_user_text(body)
         if not text.strip():
             return self._keyword_fallback(body)
@@ -46,7 +48,12 @@ class SemanticSplitterLocal(Splitter):
         model = self._load_model()
         if model is None:
             return self._keyword_fallback(body)
-        user_emb = model.encode(text)
+
+        try:
+            user_emb = model.encode(text)
+        except Exception as e:
+            logger.error(f"[SemanticSplitterLocal] model.encode failed: {e}\n{traceback.format_exc()}")
+            return self._keyword_fallback(body)
 
         # 遍历所有关键词，计算相似度，找出命中的关键词
         matched = self._match_keywords(model, user_emb)
@@ -178,10 +185,16 @@ class SemanticSplitterLocal(Splitter):
             import os
             import time
             import shutil
+            import traceback
+            logger.info(f"[SemanticSplitterLocal] _load_model called, model={self.model_name}, device={self.device}")
             try:
                 from sentence_transformers import SentenceTransformer
             except ImportError:
                 logger.warning("[SemanticSplitterLocal] sentence_transformers not available, semantic routing disabled")
+                self._model = None
+                return
+            except Exception as e:
+                logger.error(f"[SemanticSplitterLocal] failed to import sentence_transformers: {e}\n{traceback.format_exc()}")
                 self._model = None
                 return
             start = time.time()

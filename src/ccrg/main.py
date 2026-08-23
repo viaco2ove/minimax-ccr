@@ -521,7 +521,8 @@ async def _handle_request(request: Request) -> Response:
         )
         return error_resp
 
-    logger.debug(f"[{request_id}] Received request: {json.dumps(body, ensure_ascii=False)[:2000]}")
+    msgs = body.get("messages", [])
+    logger.debug(f"[{request_id}] Received request: model={body.get('model')}, messages={len(msgs)}, stream={body.get('stream')}")
 
     # 0. 检查是否启用 workflow
     if _config.workflow.enabled:
@@ -1335,12 +1336,14 @@ def _get_stage_routes(stage: str, body: dict = None) -> tuple[list[str], str, di
             logger.info(f"Image scenario detected, routing to {route}")
             return [route] + fallback, "image", _meta("scenario.image", tags.keywords)
 
-    # intention_analyze 直接用 workflow 配置，跳过 splitter 和路由引擎
+    # intention_analyze / analyze_plan 直接用 workflow 配置，跳过 splitter 和路由引擎
     if stage == "intention_analyze":
         wf_list = _config.workflow.get_intention_analyze_list()
         return wf_list, "intention_analyze", _meta("workflow.intention_analyze")
+    elif stage == "analyze_plan":
+        return _config.workflow.get_analyze_plan_list(), "analyze_plan", _meta("workflow.analyze_plan")
 
-    # 其他 stage：优先用 splitter 决策（用户语义判断），splitter 没命中时再走场景/工具/关键词规则
+    # execute_solve / chat_intention：优先用 splitter 决策，splitter 没命中时再走场景/工具/关键词规则
     splitter_decision = _try_splitter_route(body)
     if splitter_decision:
         resolved, meta = splitter_decision
@@ -1349,8 +1352,6 @@ def _get_stage_routes(stage: str, body: dict = None) -> tuple[list[str], str, di
         return [resolved] + fallback, stage, meta
     elif stage == "chat_intention":
         return _config.workflow.get_chat_intention_list(), "chat_intention", _meta("workflow.chat_intention")
-    elif stage == "analyze_plan":
-        return _config.workflow.get_analyze_plan_list(), "analyze_plan", _meta("workflow.analyze_plan")
     elif stage == "execute_solve":
         resolved, meta = _resolve_route_with_meta(body, "execute_solve")
         wf_list = _config.workflow.get_execute_solve_list()
