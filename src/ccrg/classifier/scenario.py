@@ -19,11 +19,17 @@ class ScenarioClassifier:
         routing_config = config.get("routing", {})
         scenarios_config = routing_config.get("scenarios", {})
 
-        # 0. compact 场景（优先级最高）
+        # lv1. compact 场景（优先级最高）
         if self._has_compact(request):
             return "compact"
 
-        # 1. image 场景（优先级提升：在 thinking 之前检测，因为 Claude Code 总是带 thinking 参数）
+        # lv1. long_context 场景
+        token_count = self._estimate_tokens(request)
+        threshold = scenarios_config.get("long_context", {}).get("threshold", 60000)
+        if token_count > threshold:
+            return "long_context"
+
+        # lv2. image 场景（优先级提升：在 thinking 之前检测，因为 Claude Code 总是带 thinking 参数）
         if self._has_image_content(request):
             return "image"
 
@@ -40,11 +46,7 @@ class ScenarioClassifier:
         if "haiku" in model.lower():
             return "background"
 
-        # 5. long_context 场景
-        token_count = self._estimate_tokens(request)
-        threshold = scenarios_config.get("long_context", {}).get("threshold", 60000)
-        if token_count > threshold:
-            return "long_context"
+
 
         return None
 

@@ -1323,18 +1323,29 @@ def _get_stage_routes(stage: str, body: dict = None) -> tuple[list[str], str, di
     def _meta(rule: str, kws: list[str] = None) -> dict:
         return {"matched_rule": rule or "", "matched_keyword": ",".join(kws) if kws else ""}
 
-    # 优先检查 scenario：如果有图片，直接走 image 场景路由
+    # 优先检查 /compact 和 lv1 scenario（compact / long_context / image）
     if body:
+        # /compact 命令
+        if _is_compact_request(body):
+            compact_config = _config.routing.get("scenarios", {}).get("compact", {})
+            route = compact_config.get("route", "minimax_long:MiniMax-M3")
+            fallback = compact_config.get("fallback", [])
+            logger.info(f"/compact request detected, routing to {route}")
+            return [route] + fallback, "compact", _meta("scenario.compact")
+
+        # scenario 检测（long_context / image）
         try:
             tags = _classify_request(body)
         except Exception:
             tags = None
-        if tags and tags.scenario == "image":
-            image_config = _config.routing.get("scenarios", {}).get("image", {})
-            route = image_config.get("route", "mmx:MiniMax-M2.7")
-            fallback = image_config.get("fallback", [])
-            logger.info(f"Image scenario detected, routing to {route}")
-            return [route] + fallback, "image", _meta("scenario.image", tags.keywords)
+        if tags and tags.scenario !='think':
+            scenarios_cfg = _config.routing.get("scenarios", {})
+            cfg = scenarios_cfg.get(tags.scenario, {})
+            route = cfg.get("route", "")
+            fallback = cfg.get("fallback", [])
+            if route:
+                logger.info(f"Scenario '{tags.scenario}' detected, routing to {route}")
+                return [route] + fallback, tags.scenario, _meta(f"scenario.{tags.scenario}", tags.keywords)
 
     # intention_analyze / analyze_plan 直接用 workflow 配置，跳过 splitter 和路由引擎
     if stage == "intention_analyze":
@@ -1357,6 +1368,14 @@ def _get_stage_routes(stage: str, body: dict = None) -> tuple[list[str], str, di
         wf_list = _config.workflow.get_execute_solve_list()
         fallback = [r for r in wf_list if r != resolved]
         return [resolved] + fallback, "execute_solve", meta
+    elif tags and tags.scenario == 'think':
+        scenarios_cfg = _config.routing.get("scenarios", {})
+        cfg = scenarios_cfg.get(tags.scenario, {})
+        route = cfg.get("route", "")
+        fallback = cfg.get("fallback", [])
+        if route:
+            logger.info(f"Scenario '{tags.scenario}' detected, routing to {route}")
+            return [route] + fallback, tags.scenario, _meta(f"scenario.{tags.scenario}", tags.keywords)
     else:
         # 未知阶段，默认 execute_solve
         logger.warning(f"Unknown workflow_stage: {stage}, defaulting to execute_solve")
