@@ -3,33 +3,35 @@
 
 from PyInstaller.utils.hooks import collect_all
 
-# torch 需要 collect_all 才能正确打包（原生 DLL + 子模块多）
-_torch_datas, _torch_binaries, _torch_hiddenimports = collect_all('torch')
-_st_datas, _st_binaries, _st_hiddenimports = collect_all('sentence_transformers')
+_torch_d, _torch_b, _torch_h = collect_all('torch')
+_st_d, _st_b, _st_h = collect_all('sentence_transformers')
+_tr_d, _tr_b, _tr_h = collect_all('transformers')
+_tok_d, _tok_b, _tok_h = collect_all('tokenizers')
+_safe_d, _safe_b, _safe_h = collect_all('safetensors')
+_hf_hub_d, _hf_hub_b, _hf_hub_h = collect_all('huggingface_hub')
 
 a = Analysis(
     ['run_ccrg.py'],
     pathex=[],
-    binaries=_torch_binaries + _st_binaries,
+    binaries=_torch_b + _st_b + _tr_b + _tok_b + _safe_b + _hf_hub_b,
     datas=[
         ('src\\ccrg', 'ccrg'),
         ('.gateway.json', '.'),
         ('keywords.json', '.'),
-    ] + _torch_datas + _st_datas,
+    ] + _torch_d + _st_d + _tr_d + _tok_d + _safe_d + _hf_hub_d,
     hiddenimports=[
         'fastapi', 'uvicorn', 'httpx', 'python_dotenv',
-        'numpy',
-        'sqlite3', '_sqlite3',
-        'torch', 'sentence_transformers',
-        'huggingface_hub', 'transformers',
-    ] + _torch_hiddenimports + _st_hiddenimports,
+        'numpy', 'sqlite3', '_sqlite3',
+        'torch', 'torch.cuda', 'torch.backends.cudnn',
+        'sentence_transformers', 'transformers',
+        'huggingface_hub', 'tokenizers', 'safetensors',
+    ] + _torch_h + _st_h + _tr_h + _tok_h + _safe_h + _hf_hub_h,
     hookspath=[],
-    hooksconfig={},
     runtime_hooks=[],
     excludes=[
         'tensorboard', 'tensorboardX',
         'matplotlib', 'PIL', 'cv2',
-        'pytest', 'unittest',
+        'pytest', 'unittest', 'tkinter',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -39,22 +41,12 @@ a = Analysis(
 pyz = PYZ(a.pure)
 
 exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    name='ccrg',
-    debug=False,
-    icon=None,
-    console=True,
+    pyz, a.scripts, a.binaries, a.datas,
+    name='ccrg', debug=False, icon=None, console=True,
 )
 
 coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
+    exe, a.binaries, a.datas,
+    strip=False, upx=False, upx_exclude=[],
     name='ccrg',
 )
