@@ -271,8 +271,18 @@ def init_app(config_path: str | None = None) -> FastAPI:
     # 预加载 semantic_splitter 模型（避免第一次请求时才下载）
     if active_strategy == "semantic_splitter":
         logger.info("[SemanticSplitterLocal] 预加载模型中...")
-        _workflow_splitter._load_model()
-        logger.info("[SemanticSplitterLocal] 模型预加载完成")
+        try:
+            _workflow_splitter._load_model()
+        except Exception as e:
+            logger.error(f"[SemanticSplitterLocal] 模型预加载失败: {e}（语义分块将降级为关键词路由，首请求也会按需重试加载）")
+        else:
+            if getattr(_workflow_splitter, "_model", None) is None:
+                logger.warning(
+                    "[SemanticSplitterLocal] 预加载未实际加载模型（可能 sentence_transformers 缺失），"
+                    "语义分块将降级为关键词路由"
+                )
+            else:
+                logger.info("[SemanticSplitterLocal] 模型预加载完成")
 
     # 初始化 per-provider 并发控制信号量
     global _provider_semaphores
@@ -1268,8 +1278,18 @@ def _classify_request(request: dict, stage: str = None) -> RequestTags:
 
 
 def _detect_workflow_intent(body: dict, keywords: dict) -> RoutingDecision:
-    """基于 splitter 检测工作流意图，返回完整路由决策"""
-    global _workflow_splitter
+    """基于 splitter 检测工作流意图，返回完整路由决策。
+
+    优化：会话标题生成等一次性 completion（Claude Code 会把会话内容包在
+    <session> 中并要求生成 title）不需要语义意图路由，直接走标准默认路由，
+    避免为无关请求加载昂贵的 embedding 模型（m3e-small / bge-m3）。
+    """
+    global _workflow_splitter, _config
+    if _is_title_generation_request(body):
+        default = (_config.routing.get("default", "minimax:MiniMax-M2.7")
+                   if _config else "minimax:MiniMax-M2.7")
+        logger.info("[_detect_workflow_intent] title/summary request, skip semantic splitter, route=default")
+        return RoutingDecision(intent="chat", route=default, matched_rule="non_workflow_bypass")
     if _workflow_splitter is not None:
         return _workflow_splitter.detect(body)
     # Fallback: 旧逻辑（不应该走到这里）
@@ -1350,9 +1370,13 @@ def _get_stage_routes(stage: str, body: dict = None) -> tuple[list[str], str, di
     # intention_analyze / analyze_plan 直接用 workflow 配置，跳过 splitter 和路由引擎
     if stage == "intention_analyze":
         wf_list = _config.workflow.get_intention_analyze_list()
-        return wf_list, "intention_analyze", _meta("workflow.intention_analyze")
+        _meta_workflow=_meta("workflow.intention_analyze")
+        return wf_list, "intention_analyze",_meta_workflow
     elif stage == "analyze_plan":
-        return _config.workflow.get_analyze_plan_list(), "analyze_plan", _meta("workflow.analyze_plan")
+        plan_list = _config.workflow.get_analyze_plan_list()
+        _meta_workflow =  _meta("workflow.analyze_plan")
+        return plan_list, "analyze_plan", _meta_workflow
+
 
     # execute_solve / chat_intention：优先用 splitter 决策，splitter 没命中时再走场景/工具/关键词规则
     splitter_decision = _try_splitter_route(body)
@@ -1376,6 +1400,11 @@ def _get_stage_routes(stage: str, body: dict = None) -> tuple[list[str], str, di
         if route:
             logger.info(f"Scenario '{tags.scenario}' detected, routing to {route}")
             return [route] + fallback, tags.scenario, _meta(f"scenario.{tags.scenario}", tags.keywords)
+    elif stage == "tool_use":
+        plan_list = _config.workflow.get_analyze_plan_list()
+        _meta_workflow = _meta("workflow.analyze_plan")
+        return plan_list, "analyze_plan", _meta_workflow
+
     else:
         # 未知阶段，默认 execute_solve
         logger.warning(f"Unknown workflow_stage: {stage}, defaulting to execute_solve")
@@ -1594,9 +1623,33 @@ def _infer_stage_from_context(body: dict) -> str:
                 break
 
     if has_tool_use:
-        return "analyze_plan"
+        return "tool_use"
 
     return "execute_solve"
+
+
+def _is_title_generation_request(body: dict) -> bool:
+    """判断请求是否为会话标题/摘要类一次性 completion。
+
+    Claude Code 的会话标题生成会把会话内容包在 <session>...</session> 中，
+    且 system 提示要求生成 title（"Generate a concise, sentence-case title"）。
+    这类请求不是 CCR 工作流步骤，不需要语义意图路由，应跳过 embedding 模型。
+    """
+    for msg in body.get("messages", []):
+        content = msg.get("content", "")
+        texts = []
+        if isinstance(content, str):
+            texts = [content]
+        elif isinstance(content, list):
+            texts = [
+                b.get("text", "") for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            ]
+        for t in texts:
+            tl = t.lower()
+            if "<session>" in tl or "generate a concise" in tl or "generate a title" in tl:
+                return True
+    return False
 
 
 def _is_user_initiated_message(body: dict) -> bool:
@@ -2555,19 +2608,21 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 all_failed = False
                 yield chunk
             # 阶段完成后，注入 {workflow_stage:xxx} tag 告诉 CCRG 下一步该设什么 stage
-            # Claude Code 会将可见文本保留在对话历史中，下一次请求时 CCRG 从 assistant 消息提取
-            _stage_hints = {
-                "intention_analyze": "execute_solve",
-                "execute_solve": "analyze_plan",
-                "analyze_plan": "execute_write",
-            }
-            next_stage = _stage_hints.get(step_name)
-            if next_stage:
-                tag = f"\n\n{{workflow_stage:{next_stage}}}"
-                tag_sse = f"data: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': tag}})}\n\n"
-                yield tag_sse.encode()
-                yield b"data: [DONE]\n\n"
+            # （仅对语义分块路由结果注入；keyword_routing / non_workflow_bypass 命中属一次性
+            #  completion（如会话标题生成），不应向响应污染 workflow_stage tag）
+            if routing_decision.matched_rule not in ("keyword_routing", "non_workflow_bypass"):
+                _stage_hints = {
+                    "intention_analyze": "execute_solve",
+                    "execute_solve": "analyze_plan",
+                    "analyze_plan": "execute_write",
+                }
+                next_stage = _stage_hints.get(step_name)
+                if next_stage:
+                    tag = f"\n\n{{workflow_stage:{next_stage}}}"
+                    tag_sse = f"data: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': tag}})}\n\n"
+                    yield tag_sse.encode()
             # 正常返回，不走下面的 error 处理
+            yield b"data: [DONE]\n\n"
             return
 
         except Exception:

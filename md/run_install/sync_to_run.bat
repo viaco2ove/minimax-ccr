@@ -3,7 +3,7 @@
 :: 双击此脚本即可完成同步
 
 set SRC=D:\Users\viaco\PycharmProjects\minimax-ccr\src
-set DST=D:\Users\viaco\PycharmProjects\minimax-ccr-run\src
+set DST=D:\Users\viaco\PycharmProjects\minimax-ccr-run\bat_run\src
 
 echo 正在同步源码到 run 环境...
 xcopy /E /Y /I "%SRC%\ccrg" "%DST%\ccrg"

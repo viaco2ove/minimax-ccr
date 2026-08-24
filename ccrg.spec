@@ -1,47 +1,56 @@
-# PyInstaller 打包配置
+# PyInstaller 打包配置 (onedir + 外部 ml_lib 引用库)
 # 运行: pyinstaller ccrg.spec
-
-from PyInstaller.utils.hooks import collect_all
-
-_torch_d, _torch_b, _torch_h = collect_all('torch')
-_st_d, _st_b, _st_h = collect_all('sentence_transformers')
-_tr_d, _tr_b, _tr_h = collect_all('transformers')
-_tok_d, _tok_b, _tok_h = collect_all('tokenizers')
-_safe_d, _safe_b, _safe_h = collect_all('safetensors')
-_hf_hub_d, _hf_hub_b, _hf_hub_h = collect_all('huggingface_hub')
+#
+# 设计：重型 ML 栈(torch / sentence_transformers / transformers / tokenizers /
+# safetensors / huggingface_hub / numpy) 不冻结进 exe，而是作为真实包放在
+# dist/ccrg/ml_lib/，运行时由 runtime_ml_lib_hook.py 注入 sys.path 后正常 import。
+# 这样：
+#   1. exe 体积小、启动快，且避免 PyInstaller 搬运 torch 原生 dll 导致的 segfault；
+#   2. ml_lib 缺失时 exe 仍正常运行(自动降级 keyword 路由，不崩溃)；
+#   3. 放入 ml_lib 即启用语义路由，等于"装插件升级"。
+# 构建后需运行 build_copy_ml_lib.py 把 ML 栈拷进 dist/ccrg/ml_lib/。
 
 a = Analysis(
     ['run_ccrg.py'],
     pathex=[],
-    binaries=_torch_b + _st_b + _tr_b + _tok_b + _safe_b + _hf_hub_b,
+    binaries=[
+        # conda 环境中的系统 DLL，PyInstaller 无法自动解析
+        ('D:/ProgramData/miniconda3/Library/bin/sqlite3.dll', '.'),
+        ('D:/ProgramData/miniconda3/Library/bin/ffi.dll', '.'),
+        ('D:/ProgramData/miniconda3/Library/bin/liblzma.dll', '.'),
+        ('D:/ProgramData/miniconda3/Library/bin/libbz2.dll', '.'),
+        ('D:/ProgramData/miniconda3/Library/bin/libmpdec-4.dll', '.'),
+        ('D:/ProgramData/miniconda3/Library/bin/libexpat.dll', '.'),
+    ],
     datas=[
         ('src\\ccrg', 'ccrg'),
         ('.gateway.json', '.'),
         ('keywords.json', '.'),
-    ] + _torch_d + _st_d + _tr_d + _tok_d + _safe_d + _hf_hub_d,
+    ],
     hiddenimports=[
-        'fastapi', 'uvicorn', 'httpx', 'python_dotenv',
-        'numpy', 'sqlite3', '_sqlite3',
-        'torch', 'torch.cuda', 'torch.backends.cudnn',
-        'sentence_transformers', 'transformers',
-        'huggingface_hub', 'tokenizers', 'safetensors',
-    ] + _torch_h + _st_h + _tr_h + _tok_h + _safe_h + _hf_hub_h,
+        'fastapi', 'uvicorn', 'httpx', 'dotenv',
+        # 标准库，不在 ml_lib 中，必须冻结进 exe
+        'sqlite3', '_sqlite3',
+    ],
     hookspath=[],
-    runtime_hooks=[],
+    runtime_hooks=['runtime_ml_lib_hook.py'],
     excludes=[
         'tensorboard', 'tensorboardX',
         'matplotlib', 'PIL', 'cv2',
         'pytest', 'unittest', 'tkinter',
+        # 重型 ML 栈：不冻结，改由 ml_lib 外部引用
+        'torch', 'torch.cuda', 'torch.backends.cudnn',
+        'sentence_transformers', 'transformers',
+        'huggingface_hub', 'tokenizers', 'safetensors',
+        'numpy',
     ],
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
-    cipher=None,
+    noarchive=False,
 )
 
 pyz = PYZ(a.pure)
 
 exe = EXE(
-    pyz, a.scripts, a.binaries, a.datas,
+    pyz, a.scripts,
     name='ccrg', debug=False, icon=None, console=True,
 )
 

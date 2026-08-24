@@ -28,6 +28,9 @@ class SemanticSplitterLocal(Splitter):
         self.device = cfg.get("device", "cpu")
         self.trust_remote_code = cfg.get("trust_remote_code", False)
         self._model = None
+        # 模型加载曾失败（如打包/frozen 环境 sentence_transformers 不可用，或 import 触发原生崩溃）
+        # 则永远不再尝试加载，避免单次请求反复 import 把整个进程拖死（闪退）。
+        self._load_failed = False
 
         # 从 keywords.json 预取关键词
         wflow = self.keywords.get("workflow_intent", {})
@@ -45,6 +48,10 @@ class SemanticSplitterLocal(Splitter):
         if not text.strip():
             return self._keyword_fallback(body)
 
+        # 模型曾加载失败（如打包/frozen 环境 sentence_transformers 不可用，或 import 时触发原生崩溃）：
+        # 直接降级 keyword 路由，绝不再尝试加载，避免单次请求反复 import 把整个进程拖死（闪退）。
+        if self._load_failed:
+            return self._keyword_fallback(body)
         model = self._load_model()
         if model is None:
             return self._keyword_fallback(body)
@@ -181,6 +188,8 @@ class SemanticSplitterLocal(Splitter):
         return result
 
     def _load_model(self):
+        if self._load_failed:
+            return self._model
         if self._model is None:
             import os
             import time
@@ -192,10 +201,12 @@ class SemanticSplitterLocal(Splitter):
             except ImportError:
                 logger.warning("[SemanticSplitterLocal] sentence_transformers not available, semantic routing disabled")
                 self._model = None
+                self._load_failed = True
                 return
             except Exception as e:
                 logger.error(f"[SemanticSplitterLocal] failed to import sentence_transformers: {e}\n{traceback.format_exc()}")
                 self._model = None
+                self._load_failed = True
                 return
             start = time.time()
 
@@ -258,10 +269,14 @@ class SemanticSplitterLocal(Splitter):
                     logger.info(f"[SemanticSplitterLocal] 模型加载完成，耗时 {elapsed:.1f}s")
                 except Exception as e2:
                     logger.error(f"[SemanticSplitterLocal] 重试后仍失败: {e2}，请更换模型（推荐 BAAI/bge-m3）")
-                    raise
+                    self._model = None
+                    self._load_failed = True
+                    return
             except Exception as e:
                 logger.error(f"[SemanticSplitterLocal] 模型加载失败: {e}，请更换模型（推荐 BAAI/bge-m3 或 shibing624/text2vec-base-chinese）")
-                raise
+                self._model = None
+                self._load_failed = True
+                return
         return self._model
 
     def _get_model_cache_dir(self):
