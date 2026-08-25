@@ -2580,7 +2580,29 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
             _route_meta["matched_keyword"] = route_meta.get("matched_keyword", "")
             _route_meta["matched_rule"] = route_meta.get("matched_rule", "")
 
-        # 4. 流式调用 provider（带 fallback）
+        # 4. intention_analyze 阶段嵌入 workflow prompt
+        if step_name == "intention_analyze":
+            workflow_prompt = """流程：intention_analyze → execute_solve → analyze_plan → execute_write
+- "{workflow_stage:intention_analyze}": 分析用户意图阶段
+- "{workflow_stage:execute_solve}": 执行解决方案阶段
+- "{workflow_stage:analyze_plan}": 分析执行结果阶段
+- "{workflow_stage:execute_write}": 写入结果阶段
+返回时：请用 {workflow_stage:execute_solve} 等标识你下一步想继续分析，还是执行解决方案，还是写入结果
+
+"""
+            processed_msgs = []
+            for i, msg in enumerate(msgs):
+                if msg.get("role") == "user" and i == 0:
+                    original_content = msg.get("content", "")
+                    if isinstance(original_content, str):
+                        processed_msgs.append({**msg, "content": workflow_prompt + original_content})
+                    else:
+                        processed_msgs.append(msg)
+                else:
+                    processed_msgs.append(msg)
+            msgs = processed_msgs
+
+        # 5. 流式调用 provider（带 fallback）
         router = FallbackRouter(route_list, request_id, step_name)
         router.log_route_hit("RouteList", str(route_list))
 
