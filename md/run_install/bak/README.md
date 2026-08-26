@@ -1,57 +1,42 @@
-# minimax-ccr-run 安装说明
+# minimax-ccr-run 部署
 
-## 环境说明
+## 方式一：同步脚本（日常开发用）
 
-- **开发环境**（3429）：`$minimax-ccr` — 修改源代码
-- **运行环境**（3428）：`$minimax-ccr-run` — 实际运行服务
+修改源码后，双击同步：
 
-## 两种部署方式
-
-### 方式一：源码同步安装（推荐开发时使用）
-
-将 minimax-ccr 以 editable 模式安装到 run 的虚拟环境，修改源代码后立即生效，无需手动复制。
-
-```bash
-# 安装/更新
-$minimax-ccr-run\.venv\Scripts\python.exe -m pip install -e $minimax-ccr --quiet
-
-# 验证安装（显示路径说明装好了）
-$minimax-ccr-run\.venv\Scripts\python.exe -c "import ccrg; print(ccrg.__file__)"
+```
+md/run_install/sync_to_run.bat
 ```
 
-### 方式二：手动复制代码
-
-当需要在某台机器独立部署、不依赖源码时使用。
-
-1. 将 `src/ccrg/` 整个目录复制到 `$minimax-ccr-run\src\`
-2. 重启服务
-
-## 重启服务
-
+然后重启 run 环境：
 ```bash
-# 进入 run 环境
-cd $minimax-ccr-run
-
-# 停止旧服务（如果正在运行），然后启动
+cd D:\Users\viaco\PycharmProjects\minimax-ccr-run
 .venv\Scripts\python.exe -m ccrg.main
 ```
 
-## 调试
+## 方式二：打包成 exe
 
-日志文件：`$minimax-ccr\logs\ccrg.log`
-
-网关日志目录：`$minimax-ccr\logs\req\` — 包含每个请求的完整发送 JSON
-
-## 常见问题
-
-**Q: 修改代码后没生效？**
-A: 确认用的是 run 虚拟环境里的 python，重启服务。
-
-**Q: 只想临时测试某个文件改动了不影响原环境？**
-A: 用方式一，改动通过 pip install -e 直接生效，测试完记得 revert 源码改动。
-
-**Q: 想在开发环境也装一份？**
-A: 在 minimax-ccr 目录下直接运行：
+需要先安装 PyInstaller：
 ```bash
-pip install -e .
+pip install pyinstaller
 ```
+
+然后打包：
+```bash
+cd D:\Users\viaco\PycharmProjects\minimax-ccr
+pyinstaller ccrg.spec --clean
+```
+
+exe 文件输出到 `dist\ccrg\ccrg.exe`，直接运行即可。
+
+打包前先同步源码（方式一），确保 exe 里是最新的代码。
+
+## 配置文件
+
+配置文件位置：
+- `.gateway.json` — provider、routing、workflow 配置
+- `keywords.json` — 关键词路由配置
+
+修改后重启服务即可生效。
+
+**注意**：exe 打包后，配置文件需要跟随 exe 放在同一目录下。
