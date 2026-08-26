@@ -9,8 +9,23 @@ import shutil
 import sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-VENV_SP = os.path.join(ROOT, ".venv", "Lib", "site-packages")
-DST = os.path.join(ROOT, "dist_nu", "ccrg", "ml_lib")
+import os as _os
+_USER = _os.environ.get("USERPROFILE", r"C:\Users\viaco")
+# ccrg312 may be in user-level .conda/envs/ or standard conda envs/
+_CANDIDATES = [
+    _os.path.join(_USER, ".conda", "envs", "ccrg312"),
+    _os.path.join(_os.environ.get("CONDA_ROOT", r"D:\ProgramData\miniconda3"), "envs", "ccrg312"),
+]
+VENV_SP = None
+for _c in _CANDIDATES:
+    _sp = _os.path.join(_c, "Lib", "site-packages")
+    if _os.path.isdir(_sp):
+        VENV_SP = _sp
+        break
+if VENV_SP is None:
+    print(f"[build_copy_ml_nu_lib] site-packages not found in any candidate: {_CANDIDATES}")
+    sys.exit(1)
+DST = _os.path.join(ROOT, "dist_nu", "ccrg", "ml_lib")
 
 ML_PACKAGES = {
     "torch", "functorch", "torchgen",

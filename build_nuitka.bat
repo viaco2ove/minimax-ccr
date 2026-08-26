@@ -2,44 +2,56 @@
 setlocal
 
 echo ========================================
-echo ## winget install Microsoft.VisualStudio.2022.BuildTools
-echo ## or conda python=3.12
-echo conda create -n ccrg312 python=3.12 -y
-echo conda activate ccrg312
-echo pip install fastapi uvicorn httpx ...
-echo need:conda activate ccrg312
 echo   CCRG Nuitka Build Script
 echo   Output: dist_nu\ccrg\run_ccrg.exe + ml_lib
 echo ========================================
 echo.
 
 :: ========== 1. Environment ==========
-cd /d "%~dp0"
+for %%I in ("%~f0") do set "BAT_DIR=%%~dpI"
+set "BAT_DIR=%BAT_DIR:~0,-1%"
+cd /d "%BAT_DIR%"
 echo [1/7] Project dir: %CD%
 echo.
 
-:: Activate conda env ccrg312 (Python 3.12, Nuitka-safe)
-:: Python 3.13 + MSVC 14.2 on this box causes Nuitka segfault, so we use 3.12.
-where conda >nul 2>&1
-if errorlevel 1 (
-    echo [ERROR] conda not found in PATH
-    echo Install Miniconda/Anaconda first.
+:: Locate conda base (check known locations, most common first)
+set "CONDA_ROOT="
+if exist "D:\ProgramData\miniconda3\Scripts\conda.exe" set "CONDA_ROOT=D:\ProgramData\miniconda3"
+if not defined CONDA_ROOT if exist "C:\ProgramData\miniconda3\Scripts\conda.exe" set "CONDA_ROOT=C:\ProgramData\miniconda3"
+if not defined CONDA_ROOT if exist "%USERPROFILE%\miniconda3\Scripts\conda.exe" set "CONDA_ROOT=%USERPROFILE%\miniconda3"
+if not defined CONDA_ROOT if exist "%USERPROFILE%\anaconda3\Scripts\conda.exe" set "CONDA_ROOT=%USERPROFILE%\anaconda3"
+if not defined CONDA_ROOT (
+    echo [ERROR] conda not found
     pause
     exit /b 1
 )
+echo   Conda: %CONDA_ROOT%
 
-call conda activate ccrg312
-if errorlevel 1 (
-    echo [ERROR] conda env ccrg312 not found
-    echo Create it: conda create -n ccrg312 python=3.12 -y
-    pause
-    exit /b 1
+:: Python 3.12 env (Python 3.13 + MSVC 14.2 = segfault)
+:: Check user-level conda envs dir first (C:\Users\viaco\.conda\envs\)
+:: then standard conda envs dir
+set "PYTHON_EXE=%USERPROFILE%\.conda\envs\ccrg312\python.exe"
+if not exist "%PYTHON_EXE%" set "PYTHON_EXE=%CONDA_ROOT%\envs\ccrg312\python.exe"
+if not exist "%PYTHON_EXE%" (
+    echo [INFO] Creating conda env ccrg312 (Python 3.12)...
+    "%CONDA_ROOT%\Scripts\conda.exe" create -n ccrg312 python=3.12 -y
+    if errorlevel 1 (
+        echo [ERROR] conda env creation failed
+        pause
+        exit /b 1
+    )
+    :: Try user-level path again after creation
+    set "PYTHON_EXE=%USERPROFILE%\.conda\envs\ccrg312\python.exe"
 )
 
-pip show nuitka >nul 2>&1
+:: Verify Python version
+for /f "delims=" %%V in ('"%PYTHON_EXE%" --version 2^>^&1') do echo   Python: %%V
+
+:: Install nuitka if missing
+"%PYTHON_EXE%" -m pip show nuitka >nul 2>&1
 if errorlevel 1 (
-    echo [INFO] Installing nuitka in ccrg312...
-    pip install nuitka
+    echo [INFO] Installing nuitka...
+    "%PYTHON_EXE%" -m pip install nuitka
     if errorlevel 1 (
         echo [ERROR] nuitka install failed
         pause
@@ -61,13 +73,25 @@ echo [3/7] Nuitka compiling...
 echo   This may take 5-15 minutes, please wait...
 echo.
 
-python -m nuitka ^
+set "PYTHONPATH=%CD%\src;%PYTHONPATH%"
+set "CONDA_ROOT=%CONDA_ROOT%"
+@REM   --windows-console-mode=attach ^
+@REM  --windows-console-mode=force ^
+"%PYTHON_EXE%" -m nuitka ^
   --standalone ^
-  --windows-console-mode=attach ^
+  --windows-console-mode=force ^
   --assume-yes-for-downloads ^
+  --disable-plugin=anti-bloat ^
+  --disable-plugin=multiprocessing ^
+  --nofollow-import-to=torch ^
+  --nofollow-import-to=torchvision ^
+  --nofollow-import-to=sentence_transformers ^
+  --nofollow-import-to=transformers ^
+  --nofollow-import-to=huggingface_hub ^
+  --nofollow-import-to=tokenizers ^
+  --nofollow-import-to=safetensors ^
   --output-dir=dist_nu\ccrg_build_temp ^
-  run_ccrg.py ^
-  --follow-imports
+  run_ccrg.py
 
 if errorlevel 1 (
     echo.
@@ -101,9 +125,21 @@ copy /y "keywords.json" "dist_nu\ccrg\keywords.json" >nul
 echo   Done
 echo.
 
+:: ========== 5b. Copy missing runtime DLLs ==========
+echo [5b] Copying runtime DLLs from conda env...
+for %%D in (ffi.dll libcrypto-3-x64.dll libssl-3-x64.dll msvcp140.dll msvcp140_1.dll msvcp140_2.dll msvcp140_atomic_wait.dll sqlite3.dll libbz2.dll liblzma.dll libexpat.dll) do (
+    if exist "%USERPROFILE%\.conda\envs\ccrg312\Library\bin\%%D" (
+        copy /y "%USERPROFILE%\.conda\envs\ccrg312\Library\bin\%%D" "dist_nu\ccrg\" >nul 2>nul
+    ) else if exist "%CONDA_ROOT%\Library\bin\%%D" (
+        copy /y "%CONDA_ROOT%\Library\bin\%%D" "dist_nu\ccrg\" >nul 2>nul
+    )
+)
+echo   Done
+echo.
+
 :: ========== 6. Copy ML libs ==========
 echo [6/8] Copying ML libs to dist_nu\ccrg\ml_lib\...
-python build_copy_ml_nu_lib.py 2>&1
+"%PYTHON_EXE%" build_copy_ml_nu_lib.py 2>&1
 
 if errorlevel 1 (
     echo.

@@ -1,18 +1,20 @@
 """CCRG 打包后的入口脚本"""
-import sys, os
-# 确保 src 目录在 import 路径中（兼容 PyInstaller / Nuitka / 直接运行）
-_base = os.path.dirname(os.path.abspath(__file__))
-for _src in (_base, os.path.join(_base, "ccrg")):
-    if _src not in sys.path:
-        sys.path.insert(0, _src)
+import sys, os, traceback, faulthandler
+
+# 启用 faulthandler：C 级崩溃时自动 dump Python 堆栈到文件
+_FAULT_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "faulthandler.log")
+faulthandler.enable(file=open(_FAULT_LOG, "w", encoding="utf-8"))
+
+# Nuitka multiprocessing 冻结检测：sys.frozen 必须设置
+sys.frozen = True
 
 from ccrg.main import run
-import traceback
 
 if __name__ == "__main__":
     try:
         run()
     except Exception:
         traceback.print_exc()
-        input("\n按回车键退出...")
+        if sys.stdin.isatty():
+            input("\nPress Enter to exit...")
         sys.exit(1)
