@@ -270,7 +270,7 @@ def init_app(config_path: str | None = None) -> FastAPI:
 
     # 预加载 semantic_splitter 模型（避免第一次请求时才下载）
     if active_strategy == "semantic_splitter":
-        logger.info("[SemanticSplitterLocal] 预加载模型中...")
+        logger.info("[SemanticSplitterLocal] 预加载模型中(2.0)...")
         try:
             _workflow_splitter._load_model()
         except Exception as e:

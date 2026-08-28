@@ -198,8 +198,9 @@ class SemanticSplitterLocal(Splitter):
             logger.info(f"[SemanticSplitterLocal] _load_model called, model={self.model_name}, device={self.device}")
             try:
                 from sentence_transformers import SentenceTransformer
-            except ImportError:
-                logger.warning("[SemanticSplitterLocal] sentence_transformers not available, semantic routing disabled")
+            except ImportError as e:
+                logger.warning(f"[SemanticSplitterLocal] sentence_transformers not available: {e}")
+                logger.warning(f"[SemanticSplitterLocal] sys.path[0:3]={sys.path[:3]}")
                 self._model = None
                 self._load_failed = True
                 return
