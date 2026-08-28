@@ -91,7 +91,8 @@ def clean_old_dist():
     if BUILD_TEMP.exists():
         shutil.rmtree(BUILD_TEMP, ignore_errors=True)
 
-
+# --windows-console-mode=attach ^（附加模式）命令行无日志
+# --windows-console-mode=force ^ （强制模式）命令行有无日志
 def compile_nuitka(python_exe: Path):
     print("[3/7] Nuitka compiling (5-15 min)...")
     env = os.environ.copy()
