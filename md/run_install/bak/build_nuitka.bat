@@ -7,6 +7,9 @@ echo   Output: dist_nu\ccrg\run_ccrg.exe + ml_lib
 echo ========================================
 echo.
 
+:: Force USERPROFILE (PowerShell sometimes mangles it)
+if "%USERPROFILE%"=="" set "USERPROFILE=C:\Users\viaco"
+
 :: ========== 1. Environment ==========
 for %%I in ("%~f0") do set "BAT_DIR=%%~dpI"
 set "BAT_DIR=%BAT_DIR:~0,-1%"
@@ -74,9 +77,8 @@ echo   This may take 5-15 minutes, please wait...
 echo.
 
 set "PYTHONPATH=%CD%\src;%PYTHONPATH%"
-set "CONDA_ROOT=%CONDA_ROOT%"
-@REM   --windows-console-mode=attach ^
-@REM  --windows-console-mode=force ^
+@REM   --windows-console-mode=attach ^（附加模式）
+@REM  --windows-console-mode=force ^ （强制模式）
 "%PYTHON_EXE%" -m nuitka ^
   --standalone ^
   --windows-console-mode=force ^

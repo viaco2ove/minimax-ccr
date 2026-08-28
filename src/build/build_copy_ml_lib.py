@@ -15,7 +15,7 @@ import shutil
 import sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-VENV_SP = os.path.join(ROOT, ".venv", "Lib", "site-packages")
+VENV_SP = os.path.join(ROOT, "../../.venv", "Lib", "site-packages")
 DST = os.path.join(ROOT, "dist", "ccrg", "ml_lib")
 
 # ML 核心包 + 其传递依赖（import 名）
