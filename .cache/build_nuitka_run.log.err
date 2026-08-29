@@ -1,0 +1,18 @@
+Nuitka-Options: Used command line options:
+Nuitka-Options:   --standalone --windows-console-mode=force --assume-yes-for-downloads --disable-plugin=anti-bloat --disable-plugin=multiprocessing --nofollow-import-to=torch --nofollow-import-to=torchvision --nofollow-import-to=sentence_transformers --nofollow-import-to=transformers --nofollow-import-to=huggingface_hub --nofollow-import-to=tokenizers --nofollow-import-to=safetensors --no-deployment-flag=excluded-module-usage --output-dir=D:\Users\viaco\PycharmProjects\minimax-ccr\dist_nu\ccrg_build_temp run_ccrg.py
+Nuitka: Starting Python compilation with:
+Nuitka:   Version '4.1.3' on Python 3.12 (flavor 'Anaconda Python') commercial grade 'not installed'.
+Nuitka: Completed Python level compilation and optimization.
+Nuitka: Generating source code for C backend compiler.
+Nuitka: Running data composer tool for optimal constant value handling.
+Nuitka: Running C compilation via Scons.
+Nuitka-Scons: For Python version 3.12 MSVC 14.3 or later is required, not 14.2 which is too old.
+Nuitka-Scons: Backend C compiler: gcc (gcc 15.2.0).
+Nuitka-Scons: Backend C linking with 867 files (no progress information available for this stage).
+Nuitka-Scons: Compiled 867 C files using ccache.
+Nuitka-Scons: Cached C files (using ccache) with result 'cache hit': 866
+Nuitka-Scons: Cached C files (using ccache) with result 'cache miss': 1
+Nuitka-Plugins:data-files: Included data file 'certifi\cacert.pem' due to package data for 'certifi'.
+Nuitka-Plugins:data-files: Included data file 'jaraco\text\Lorem ipsum.txt' due to package data for 'jaraco.text'.
+Nuitka: Keeping build directory 'D:\Users\viaco\PycharmProjects\minimax-ccr\dist_nu\ccrg_build_temp\run_ccrg.build'.
+Nuitka: Successfully created 'D:\Users\viaco\PycharmProjects\minimax-ccr\dist_nu\ccrg_build_temp\run_ccrg.dist\run_ccrg.exe'.

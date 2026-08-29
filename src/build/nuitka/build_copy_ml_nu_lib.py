@@ -1,31 +1,17 @@
-"""
-Nuitka 构建后步骤：把重型 ML 栈(torch/sentence_transformers/transformers/...)作为真实包
+"""Nuitka 构建后步骤：把重型 ML 栈(torch/sentence_transformers/transformers/...)作为真实包
 拷进 dist_nu/ccrg/ml_lib/，作为 exe 的外部引用库。
 
 与 build_copy_ml_lib.py 功能相同，但目标路径为 dist_nu/ccrg/ml_lib/。
+配置统一读自同目录 nuitka.ini（nuitka_cfg）。
 """
 import os
 import shutil
 import sys
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
-import os as _os
-_USER = _os.environ.get("USERPROFILE", r"C:\Users\viaco")
-# ccrg312 may be in user-level .conda/envs/ or standard conda envs/
-_CANDIDATES = [
-    _os.path.join(_USER, ".conda", "envs", "ccrg312"),
-    _os.path.join(_os.environ.get("CONDA_ROOT", r"D:\ProgramData\miniconda3"), "envs", "ccrg312"),
-]
-VENV_SP = None
-for _c in _CANDIDATES:
-    _sp = _os.path.join(_c, "Lib", "site-packages")
-    if _os.path.isdir(_sp):
-        VENV_SP = _sp
-        break
-if VENV_SP is None:
-    print(f"[build_copy_ml_nu_lib] site-packages not found in any candidate: {_CANDIDATES}")
-    sys.exit(1)
-DST = _os.path.join(ROOT, "dist_nu", "ccrg", "ml_lib")
+from nuitka_cfg import cfg
+
+VENV_SP = cfg.SITE_PACKAGES
+DST = cfg.ML_LIB
 
 ML_PACKAGES = {
     "torch", "functorch", "torchgen",
@@ -39,6 +25,7 @@ ML_PACKAGES = {
     "regex", "requests", "urllib3", "certifi", "charset_normalizer", "idna",
     "tqdm", "typing_extensions",
     "scipy", "scikit-learn",
+    "sklearn", "scikit_learn",
     "joblib", "threadpoolctl",
     "Pillow",
 }
@@ -53,18 +40,19 @@ NEVER_COPY = {
 
 def _find_package_dirs(venv_sp: str) -> set:
     result = set()
+    ml_lower = {p.lower() for p in ML_PACKAGES}
     for entry in os.listdir(venv_sp):
         entry_lower = entry.lower()
         base_name = entry_lower.split("-")[0]
-        if base_name in {p.lower() for p in ML_PACKAGES}:
+        if base_name in ml_lower:
             result.add(entry)
         if entry_lower.endswith(".dist-info"):
             pkg_name = entry_lower.replace(".dist-info", "").split("-")[0]
-            if pkg_name in {p.lower() for p in ML_PACKAGES}:
+            if pkg_name in ml_lower:
                 result.add(entry)
         if entry_lower.endswith(".libs"):
             pkg_name = entry_lower.replace(".libs", "")
-            if pkg_name in {p.lower() for p in ML_PACKAGES}:
+            if pkg_name in ml_lower:
                 result.add(entry)
     return result
 

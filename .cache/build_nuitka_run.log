@@ -1,0 +1,78 @@
+[1/7] Project dir: D:\Users\viaco\PycharmProjects\minimax-ccr
+  Conda: D:\ProgramData\miniconda3
+  Python: C:\Users\viaco\.conda\envs\ccrg312\python.exe
+  Python version: Python 3.12.13
+[2/7] Cleaning old dist...
+[3/7] Nuitka compiling (5-15 min)...
+[4/7] Renaming output...
+[5/7] Copying configs...
+[5b] Copying runtime DLLs...
+[6/7] Copying ML libs to ml_lib/...
+_yaml  (0.0 MB)
+  certifi  (0.2 MB)
+  certifi-2026.7.22.dist-info  (0.0 MB)
+  charset_normalizer  (0.5 MB)
+  charset_normalizer-3.5.1.dist-info  (0.1 MB)
+  filelock  (0.3 MB)
+  filelock-3.32.4.dist-info  (0.0 MB)
+  fsspec  (0.7 MB)
+  fsspec-2026.7.0.dist-info  (0.0 MB)
+  functorch  (0.1 MB)
+  huggingface_hub  (3.0 MB)
+  huggingface_hub-1.28.0.dist-info  (0.1 MB)
+  idna  (0.3 MB)
+  idna-3.19.dist-info  (0.0 MB)
+  jinja2  (0.5 MB)
+  jinja2-3.1.6.dist-info  (0.0 MB)
+  joblib  (0.9 MB)
+  joblib-1.5.3.dist-info  (0.0 MB)
+  markupsafe  (0.0 MB)
+  markupsafe-3.0.3.dist-info  (0.0 MB)
+  numpy  (20.4 MB)
+  numpy-2.5.2.dist-info  (0.2 MB)
+  numpy.libs  (21.1 MB)
+  packaging  (0.5 MB)
+  packaging-26.3.dist-info  (0.0 MB)
+  pyyaml-6.0.3.dist-info  (0.0 MB)
+  regex  (1.1 MB)
+  regex-2026.7.19.dist-info  (0.1 MB)
+  requests  (0.2 MB)
+  requests-2.34.2.dist-info  (0.0 MB)
+  safetensors  (0.8 MB)
+  safetensors-0.8.0.dist-info  (0.1 MB)
+  scikit_learn-1.9.0.dist-info  (0.2 MB)
+  scipy  (87.5 MB)
+  scipy-1.18.1-cp312-cp312-win_amd64.whl  (0.0 MB)
+  scipy-1.18.1.dist-info  (0.3 MB)
+  scipy.libs  (20.3 MB)
+  sentence_transformers  (2.5 MB)
+  sentence_transformers-6.0.0.dist-info  (0.1 MB)
+  sklearn  (27.1 MB)
+  threadpoolctl-3.6.0.dist-info  (0.0 MB)
+  tokenizers  (7.6 MB)
+  tokenizers-0.22.2.dist-info  (0.0 MB)
+  torch  (462.4 MB)
+  torch-2.13.0.dist-info  (1.9 MB)
+  torchgen  (2.1 MB)
+  tqdm  (0.2 MB)
+  tqdm-4.70.0.dist-info  (0.1 MB)
+  transformers  (47.1 MB)
+  transformers-5.15.1.dist-info  (0.5 MB)
+  typing_extensions-4.16.0.dist-info  (0.0 MB)
+  urllib3  (0.4 MB)
+  urllib3-2.7.0.dist-info  (0.0 MB)
+  yaml  (0.5 MB)
+
+[build_copy_ml_nu_lib] done. 54 packages, total 0.71 GB
+[build_copy_ml_nu_lib] output: D:\Users\viaco\PycharmProjects\minimax-ccr\dist_nu\ccrg\ml_lib
+[7/7] Verifying...
+  [OK] dist_nu/ccrg/run_ccrg.exe  (80 MB)
+  [OK] dist_nu/ccrg/.gateway.json
+  [OK] dist_nu/ccrg/keywords.json
+  [OK] dist_nu/ccrg/logs/
+  [OK] dist_nu/ccrg/ml_lib/
+
+========================================
+  Build complete!
+  Run:  cd dist_nu\ccrg && run_ccrg.exe
+========================================
