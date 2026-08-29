@@ -59,6 +59,8 @@ class NuitkaCfg:
         self.DIST = os.path.join(dist_base, "ccrg")   # <ROOT>/dist_nu/ccrg
         self.ML_LIB = os.path.join(self.DIST, "ml_lib")
         self.BUILD_TEMP = os.path.join(dist_base, "ccrg_build_temp")
+        # 精简更新版输出目录（不含配置文件/数据库/日志），如 /dist_nu/ccrg_update
+        self.DIST_UPDATE = _abs(self.ROOT, self.raw.get("DIST_UPDATE", "/dist_nu/ccrg_update"))
 
         # Python / conda
         self.CONDA_ENVS = self.raw.get("conda_envs", "")

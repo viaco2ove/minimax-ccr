@@ -5,8 +5,10 @@
 - 编译完成后自动执行后处理 post_build_fix.py（补 stdlib、python3.dll、缺失依赖、固定端口）
 
 用法：
-    <打包环境python> src/build/nuitka/build_nuitka.py
-    例如：C:/Users/viaco/.conda/envs/ccrg312/python.exe src/build/nuitka/build_nuitka.py
+    <打包环境python> src/build/nuitka/build_nuitka.py [--update]
+    例如：C:/Users/viaco/.conda/envs/ccrg312/python.exe src/build/nuitka/build_nuitka.py --update
+    --update：打包+后处理完成后，额外生成精简更新版到 cfg.DIST_UPDATE
+              （不含 .gateway.json / keywords.json / logs / *.db）
 """
 import os
 import shutil
@@ -138,10 +140,40 @@ def verify():
     print("  Build complete!")
 
 
+# 精简更新版需剔除的运行时数据（配置/日志/数据库），其余程序本体全部保留
+_RUNTIME_DATA_NAMES = {".gateway.json", "keywords.json", "logs", "faulthandler.log", "__pycache__"}
+
+
+def _ignore_runtime_data(directory, names):
+    """copytree 的 ignore 回调：过滤配置文件、日志与数据库。"""
+    ignored = set()
+    for n in names:
+        if n in _RUNTIME_DATA_NAMES or n.endswith(".db") or n.endswith(".log"):
+            ignored.add(n)
+    return ignored
+
+
+def make_update_copy():
+    """从完整 dist 复制出精简更新版到 cfg.DIST_UPDATE。
+
+    不含 .gateway.json / keywords.json / logs / *.db；
+    适合作为增量更新包覆盖已有安装目录，保留原目录中的配置与数据。
+    """
+    dst = cfg.DIST_UPDATE
+    print(f"\n== Generating update package: {dst} ==")
+    if not os.path.isdir(cfg.DIST):
+        raise RuntimeError(f"dist not found: {cfg.DIST}，请先完成打包")
+    if os.path.exists(dst):
+        shutil.rmtree(dst, ignore_errors=True)
+    shutil.copytree(cfg.DIST, dst, ignore=_ignore_runtime_data)
+    print(f"  [OK] update package -> {dst}  (configs / logs / *.db excluded)")
+
+
 def main():
     print(f"ROOT    = {cfg.ROOT}")
     print(f"Python  = {cfg.require_env()}")
     print(f"Dist    = {cfg.DIST}")
+    print(f"Update  = {cfg.DIST_UPDATE}" if "--update" in sys.argv else "")
 
     ensure_nuitka()
     stop_running_exe()
@@ -157,6 +189,10 @@ def main():
     fix = os.path.join(cfg.BUILD_DIR, "post_build_fix.py")
     print("\n== Running post-build fix ==")
     subprocess.run([cfg.require_env(), fix], check=False)
+
+    if "--update" in sys.argv:
+        make_update_copy()
+
     print("\nAll done. Run:  cd dist_nu/ccrg && run_ccrg.exe")
 
 

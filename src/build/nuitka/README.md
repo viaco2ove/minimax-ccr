@@ -64,7 +64,12 @@ set conda_envs={onda_envs}
 
 ```
 
-或先 `cd` 到项目根再运行：
+### 新增 --update 参数。
+打包 + 后处理完成后，自动把完整 dist 复制到 dist_nu/ccrg_update，
+并剔除所有运行时数据——.gateway.json、keywords.json、logs/、faulthandler.log、*.db
+build_nuitka.py --update
+
+### 或先 `cd` 到项目根再运行：
 
 ```
 cd $root
