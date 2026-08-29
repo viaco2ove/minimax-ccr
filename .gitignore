@@ -19,3 +19,4 @@ logs/
 /dist_nu_test/
 /dist_test/
 /dist_nu_test3/
+/.cache/
