@@ -94,7 +94,7 @@ class KeywordSplitter(Splitter):
         return bool(re.search(pattern, text))
 
     def _extract_user_text(self, body: dict) -> str:
-        """提取用户消息文本"""
+        """提取用户消息文本，剥离 <system-reminder> 块以减少会话压缩摘要的干扰"""
         texts = []
 
         for msg in body.get("messages", []):
@@ -104,10 +104,17 @@ class KeywordSplitter(Splitter):
 
             content = msg.get("content", "")
             if isinstance(content, str):
-                texts.append(content)
+                joined = content
             elif isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        texts.append(block.get("text", ""))
+                joined = " ".join(
+                    block.get("text", "") for block in content
+                    if isinstance(block, dict) and block.get("type") == "text"
+                )
+            else:
+                joined = ""
+
+            # 剥离 system-reminder 块，减少压缩摘要的噪声干扰
+            joined = re.sub(r"<system-reminder[^>]*>.*?</system-reminder>", " ", joined, flags=re.DOTALL)
+            texts.append(joined)
 
         return " ".join(texts)
