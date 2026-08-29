@@ -1,22 +1,33 @@
 """
 构建后步骤：把重型 ML 栈(torch / sentence_transformers / transformers / ...)作为真实包
-选择性拷进 dist/ccrg/ml_lib/，作为 exe 的外部引用库。
+选择性拷进 <DIST>/ccrg/ml_lib/，作为 exe 的外部引用库。
+
+分两步：
+1. 白名单复制：按 ML_PACKAGES 把 ML 核心包及其直接依赖拷进 ml_lib/；
+2. Requires-Dist 闭包补齐：按依赖闭包扫描 roots 的全部无条件运行时依赖，
+   把 ml_lib 缺失的纯 Python 依赖（如 narwhals）补进来（对齐 supply_ml_deps.py）。
 
 只拷贝 ML 相关包及其传递依赖，不拷贝已冻结进 exe 的包（uvicorn/fastapi/httpx/click 等）。
 这样 ml_lib 在 sys.path[0] 时，非 ML 包仍从 _internal/ 正常解析。
 
-运行时 runtime_ml_lib_hook.py 会把 dist/ccrg/ml_lib/ 注入 sys.path，
+运行时 runtime_ml_lib_hook.py 会把 <DIST>/ccrg/ml_lib/ 注入 sys.path，
 于是 `import torch` / `from sentence_transformers import ...` 在 frozen 环境也能正常解析。
 
 ml_lib 缺失时 exe 自动降级 keyword 路由，不崩溃。
+
+配置统一读自同目录 pyinstaller.ini（pyinstaller_cfg），site-packages 来源不硬编码。
 """
 import os
 import shutil
 import sys
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
-VENV_SP = os.path.join(ROOT, "../../.venv", "Lib", "site-packages")
-DST = os.path.join(ROOT, "dist", "ccrg", "ml_lib")
+import importlib.metadata as md
+from packaging.requirements import Requirement
+
+from pyinstaller_cfg import cfg
+
+VENV_SP = cfg.SITE_PACKAGES
+DST = cfg.ML_LIB
 
 # ML 核心包 + 其传递依赖（import 名）
 ML_PACKAGES = {
@@ -42,6 +53,9 @@ ML_PACKAGES = {
     "scipy", "scikit-learn", "sklearn",  # sentence_transformers 必需依赖（包目录名是 sklearn）
     "joblib", "threadpoolctl",
     "Pillow",  # 图像处理
+    # narwhals (新版 scikit-learn 的运行时依赖；部分环境 requires 未声明，
+    # 闭包可能扫不到，故加入白名单显式复制)
+    "narwhals",
 }
 
 # 这些永远不会拷贝（构建工具或已冻结进 exe）
@@ -51,6 +65,14 @@ NEVER_COPY = {
     # 已冻结进 exe 的包，不需要在 ml_lib 中
     "fastapi", "uvicorn", "httpx", "anyio", "starlette",
     "click", "h11", "sniffio",
+}
+
+# 闭包补齐阶段的跳过集：ML 核心大包已由白名单复制、Web 栈已冻结进 exe，
+# 都不需要再经闭包补齐（其余小依赖如 narwhals 会由闭包自动补上）。
+SKIP = NEVER_COPY | {
+    "torch", "functorch", "torchgen",
+    "sentence-transformers", "transformers", "tokenizers",
+    "huggingface-hub", "safetensors",
 }
 
 
@@ -92,41 +114,149 @@ def _find_package_dirs(venv_sp: str) -> set:
     return result
 
 
+# ---------- Requires-Dist 闭包补齐（对齐 supply_ml_deps.py） ----------
+
+def _closure(roots):
+    """收集 roots 的无条件运行时依赖闭包（不含 SKIP 自身）。
+
+    种子与 SKIP 中的包仍会展开其 requires（它们的依赖可能是需要复制的包），
+    但 SKIP 包自身不进入返回集合。
+    """
+    seen = set()
+    visited = set()
+    stack = list(roots)
+    skip = {s.lower() for s in SKIP}
+    while stack:
+        name = stack.pop()
+        norm = name.replace("_", "-").lower()
+        if norm in visited:
+            continue
+        visited.add(norm)
+        try:
+            dist = md.distribution(norm)
+        except md.PackageNotFoundError:
+            continue
+        for req_str in dist.requires or []:
+            try:
+                req = Requirement(req_str)
+            except Exception:
+                continue
+            # 只取无条件（或 extra 为空）的运行时依赖
+            if req.marker is None or req.marker.evaluate({"extra": ""}):
+                dep = req.name.replace("_", "-").lower()
+                stack.append(req.name)
+                if dep not in skip:
+                    seen.add(dep)
+    return seen
+
+
+def _dist_dir(name):
+    """返回 site-packages 中与包名匹配的目录/文件。"""
+    norm = name.replace("_", "-").lower()
+    for entry in os.listdir(VENV_SP):
+        base = entry.split("-")[0].replace("_", "-").lower()
+        if base == norm:
+            return entry
+        if entry.lower().endswith(".dist-info"):
+            pkg = entry[:-len(".dist-info")].split("-")[0].replace("_", "-").lower()
+            if pkg == norm:
+                return entry
+    return None
+
+
+def _copy_top_level(entry):
+    """按 dist-info/top_level.txt 补顶层模块文件。
+
+    单文件模块（如 typing_extensions.py）只有 dist-info 没有同名目录，
+    按发行名复制目录时极易漏掉 .py 本体；这里按 top_level 显式补齐。
+    部分发行版（如 typing_extensions 4.16）不带 top_level.txt，此时
+    以发行名推断单文件导入名兜底。
+    """
+    di_dir = os.path.join(VENV_SP, entry)
+    tl = os.path.join(di_dir, "top_level.txt")
+    if os.path.isfile(tl):
+        with open(tl, encoding="utf-8") as f:
+            tops = [ln.strip() for ln in f if ln.strip()]
+    else:
+        base = entry[:-len(".dist-info")] if entry.endswith(".dist-info") else entry
+        tops = [base.split("-")[0].replace("-", "_")]
+    for top in tops:
+        for cand in (top + ".py", top):
+            src = os.path.join(VENV_SP, cand)
+            if not (os.path.isfile(src) or os.path.isdir(src)):
+                continue
+            dst = os.path.join(DST, cand)
+            if os.path.exists(dst):
+                break
+            if os.path.isdir(src):
+                shutil.copytree(src, dst, ignore=lambda d, n: [x for x in n if x == "__pycache__"])
+            else:
+                shutil.copy2(src, dst)
+            print(f"  + top-level {cand}")
+            break
+
+
+def supply_missing_deps():
+    """按 Requires-Dist 闭包补齐 ml_lib 缺失依赖（如 narwhals）。"""
+    os.makedirs(DST, exist_ok=True)
+    roots = ["torch", "transformers", "sentence_transformers"]
+    deps = sorted(_closure(roots))
+    print(f"[build_copy_ml_lib] dependency closure: {len(deps)} packages")
+
+    copied = 0
+    for dep in deps:
+        entry = _dist_dir(dep)
+        if not entry:
+            continue
+        src = os.path.join(VENV_SP, entry)
+        dst = os.path.join(DST, entry)
+        if not os.path.exists(dst):
+            if os.path.isdir(src):
+                shutil.copytree(src, dst, ignore=lambda d, n: [x for x in n if x == "__pycache__"])
+            else:
+                shutil.copy2(src, dst)
+            copied += 1
+            print(f"  + {entry}")
+        # 单文件模块等顶层文件补齐（即使 dist-info 已存在也执行）
+        _copy_top_level(entry)
+    print(f"[build_copy_ml_lib] closure: copied {copied} missing package(s)")
+
+
 def main():
     if not os.path.isdir(VENV_SP):
         print(f"[build_copy_ml_lib] site-packages 未找到: {VENV_SP}")
         sys.exit(1)
 
-    # 找到要拷贝的目录
+    # 第一步：白名单复制 ML 核心包
     to_copy = _find_package_dirs(VENV_SP)
-
     if not to_copy:
         print("[build_copy_ml_lib] 警告：未找到任何 ML 包")
-        return
+    else:
+        if os.path.exists(DST):
+            try:
+                shutil.rmtree(DST)
+            except (OSError, FileNotFoundError):
+                pass
+        os.makedirs(DST, exist_ok=True)
 
-    # 清理旧 ml_lib 内容（只删 ml_lib 目录本身，不影响同级的 _internal/ 和 ccrg.exe）
-    if os.path.exists(DST):
-        try:
-            shutil.rmtree(DST)
-        except (OSError, FileNotFoundError):
-            pass
-    os.makedirs(DST, exist_ok=True)
+        total_bytes = 0
+        for pkg_dir in sorted(to_copy):
+            src = os.path.join(VENV_SP, pkg_dir)
+            dst = os.path.join(DST, pkg_dir)
+            if os.path.isdir(src):
+                shutil.copytree(src, dst, symlinks=False, copy_function=shutil.copy2,
+                              ignore=lambda d, n: [x for x in n if x == "__pycache__"])
+            else:
+                shutil.copy2(src, dst)
+            size = sum(os.path.getsize(os.path.join(dp, f)) for dp, _, fs in os.walk(dst) for f in fs)
+            total_bytes += size
+            print(f"  {pkg_dir}  ({size/1e6:.1f} MB)")
+        print(f"[build_copy_ml_lib] whitelist done. {len(to_copy)} packages, total {total_bytes/1e9:.2f} GB")
 
-    total_bytes = 0
-    for pkg_dir in sorted(to_copy):
-        src = os.path.join(VENV_SP, pkg_dir)
-        dst = os.path.join(DST, pkg_dir)
-        if os.path.isdir(src):
-            shutil.copytree(src, dst, symlinks=False, copy_function=shutil.copy2,
-                          ignore=lambda d, n: [x for x in n if x == "__pycache__"])
-        else:
-            shutil.copy2(src, dst)
-        size = sum(os.path.getsize(os.path.join(dp, f)) for dp, _, fs in os.walk(dst) for f in fs)
-        total_bytes += size
-        print(f"  {pkg_dir}  ({size/1e6:.1f} MB)")
+    # 第二步：闭包补齐缺失依赖
+    supply_missing_deps()
 
-    print(f"\n[build_copy_ml_lib] 完成。共 {len(to_copy)} 个包，总计 {total_bytes/1e9:.2f} GB")
-    print(f"[build_copy_ml_lib] 输出: {DST}")
+    print(f"[build_copy_ml_lib] 完成。输出: {DST}")
 
 
 if __name__ == "__main__":

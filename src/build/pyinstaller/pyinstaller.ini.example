@@ -1,0 +1,23 @@
+# minimax-ccr PyInstaller 打包配置模板（复制为 pyinstaller.ini 后按机器修改）
+#
+# 键说明：
+#   conda_path       conda 安装根目录（取其 Library\bin 下的运行时 DLL）
+#   conda_envs       打包用 conda 环境根目录（python3.dll / 可选 site-packages 来源）
+#   py_exe           PyInstaller 打包用 python.exe（需含项目依赖 + PyInstaller）
+#   site_packages    ML 栈所在 site-packages（ml_lib 来源）；留空则取 conda_envs\Lib\site-packages
+#   ROOT             项目根目录
+#   DIST             产物父目录（相对 ROOT），产物在其下 ccrg/ 中（ccrg.exe + _internal + ml_lib）
+#   USERPROFILE      用户主目录
+#   port             打包产物固定监听端口
+#   DIST_UPDATE      --update 精简更新包输出目录（相对 ROOT）
+conda_ver=miniconda3
+conda_path=C:\ProgramData\miniconda3
+conda_python_ver=python=3.12
+conda_envs=C:\Users\xxx\.conda\envs\ccrg312
+py_exe=D:\Users\xxx\PycharmProjects\minimax-ccr\.venv\Scripts\python.exe
+site_packages=D:\Users\xxx\PycharmProjects\minimax-ccr\.venv\Lib\site-packages
+ROOT=D:\Users\xxx\PycharmProjects\minimax-ccr
+DIST=/dist_py/
+USERPROFILE=C:\Users\xxx
+port=2048
+DIST_UPDATE=/dist_py/ccrg_update
