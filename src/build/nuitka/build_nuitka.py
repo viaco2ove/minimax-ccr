@@ -39,6 +39,19 @@ def clean_old_dist():
             shutil.rmtree(p, ignore_errors=True)
 
 
+def stop_running_exe():
+    """结束正在运行的 run_ccrg.exe，避免 dist 内 DLL 被占用导致覆盖失败。"""
+    if os.name == "nt":
+        res = subprocess.run(["taskkill", "/f", "/im", "run_ccrg.exe"],
+                             capture_output=True, text=True)
+        if res.returncode == 0:
+            print("[INFO] Stopped running run_ccrg.exe (DLL lock released)")
+        else:
+            print("[INFO] No running run_ccrg.exe to stop")
+    else:
+        subprocess.run(["pkill", "-f", "run_ccrg"], capture_output=True)
+
+
 def compile_nuitka():
     """调用 Nuitka 编译入口脚本（run_ccrg.py）。"""
     py = cfg.require_env()
@@ -131,6 +144,7 @@ def main():
     print(f"Dist    = {cfg.DIST}")
 
     ensure_nuitka()
+    stop_running_exe()
     clean_old_dist()
     compile_nuitka()
     rename_output()

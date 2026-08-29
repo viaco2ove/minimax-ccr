@@ -1,0 +1,8 @@
+conda_ver=miniconda3
+conda_path=C:\ProgramData\miniconda3
+conda_python_ver=python=3.12
+conda_envs=C:\Users\xxx\.conda\envs\ccrg312
+ROOT=D:\Users\xxx\PycharmProjects\minimax-ccr
+DIST=/dist_nu/
+USERPROFILE=C:\Users\xxx
+port=2048
