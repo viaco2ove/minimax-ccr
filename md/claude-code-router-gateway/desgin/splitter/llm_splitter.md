@@ -7,16 +7,21 @@
 
 `.gateway.json`：
 
-```json
+```
 "splitter": {
     "active_strategy": "llm_splitter",
     "llm_splitter": {
-        "routes": ["minimax:MiniMax-M2.7", "qianfan:qianfan-code-latest"],
-        "timeout": 10000
+        "routes":  ["minimax:MiniMax-M2.7", "qianfan:qianfan-code-latest"],
+        "timeout":  10000
     }
 }
 ```
-
+```
+      "llm_splitter": {
+          "routes":  ["minimax:MiniMax-M2.7", "minimax_long:MiniMax-M3"],
+          "timeout":  10000
+      }
+```
 ### 字段说明
 
 | 字段 | 说明 |

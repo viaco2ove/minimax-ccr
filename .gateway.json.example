@@ -356,6 +356,10 @@
           "model_name": "moka-ai/m3e-small",
           "hf_endpoint":"https://hf-mirror.com",
           "trust_remote_code": true
+      },
+      "llm_splitter": {
+          "routes":  ["minimax:MiniMax-M2.7", "minimax_long:MiniMax-M3"],
+          "timeout":  10000
       }
     }
   }

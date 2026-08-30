@@ -1345,8 +1345,8 @@ def _get_stage_routes(stage: str, body: dict = None) -> tuple[list[str], str, di
 
     # 优先检查 /compact 和 lv1 scenario（compact / long_context / image）
     if body:
-        # /compact 命令
-        if _is_compact_request(body):
+        # /compact 命令（仅纯 compact，合并发言不在此拦截）
+        if _is_pure_compact_request(body):
             compact_config = _config.routing.get("scenarios", {}).get("compact", {})
             route = compact_config.get("route", "minimax_long:MiniMax-M3")
             fallback = compact_config.get("fallback", [])
@@ -1817,6 +1817,62 @@ def _is_compact_request(body: dict) -> bool:
                 if isinstance(block, dict) and block.get("type") == "text":
                     if "/compact" in block.get("text", ""):
                         return True
+        break  # 只检查最后一条 user 消息
+    return False
+
+
+# Claude Code 命令包装 / 系统回显文本标记：这些块不算用户真实发言
+_COMPACT_SYSTEM_MARKERS = (
+    "<command-name>",
+    "<command-message>",
+    "<command-args>",
+    "<local-command-stdout>",
+    "<local-command-caveat>",
+    "[Request interrupted by user]",
+    "<system-reminder>",
+)
+
+
+def _is_pure_compact_request(body: dict) -> bool:
+    """判断请求是否是"纯 /compact 命令"。
+
+    新版 Claude Code 会把 /compact 命令、执行回显与 /compact 之后的用户
+    真实发言合并进同一条 user 消息（如 req_cfd6a5cc：block[3] 为命令包装、
+    block[5]="继续" 为真实发言）。本函数区分两种情形：
+    - 纯 /compact 命令（消息内除命令包装/系统回显外无用户真实发言）→ True
+    - /compact 命令 + 用户后续发言合并 → False（应走正常意图分析，不吞发言）
+
+    /compact 请求应直接透传给模型，不走 analyze_plan/execute_solve 流程。
+    """
+    messages = body.get("messages", [])
+    for msg in reversed(messages):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "")
+        texts: list[str] = []
+        if isinstance(content, str):
+            texts = [content]
+        elif isinstance(content, list):
+            texts = [
+                b.get("text", "")
+                for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            ]
+
+        has_compact_cmd = False
+        has_real_speech = False
+        for t in texts:
+            if "/compact" in t:
+                has_compact_cmd = True
+            stripped = t.strip()
+            if not stripped:
+                continue
+            if any(m in stripped for m in _COMPACT_SYSTEM_MARKERS):
+                continue
+            has_real_speech = True
+
+        if has_compact_cmd:
+            return not has_real_speech
         break  # 只检查最后一条 user 消息
     return False
 
@@ -2572,8 +2628,8 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
             logger.debug(f"[{request_id}] Routing: stage={stage}, intent={intent}, user_initiated={is_user_initiated}")
             logger.debug(f"[{request_id}] Route list: {route_list}")
 
-        # /compact 请求特殊处理
-        is_compact = _is_compact_request(body)
+        # /compact 请求特殊处理（仅纯 compact，合并发言不覆盖 stage）
+        is_compact = _is_pure_compact_request(body)
         if is_compact:
             logger.info(f"[{request_id}] /compact request → direct pass-through, overriding stage to execute_solve")
             route_list, step_name, route_meta = _get_stage_routes("execute_solve", body)

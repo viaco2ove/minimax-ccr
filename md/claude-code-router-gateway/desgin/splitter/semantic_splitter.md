@@ -28,7 +28,7 @@
         "embedding_provider": "minimax",
         "embedding_model": "embo-01",
         "embedding_api": "https://api.minimaxi.com/embedding",
-        "embedding_api_key": "$EMBEDDING_API_KEY"
+        "embedding_api_key": "$EMBEDDING_API_KEY",
         "threshold": 0.6
       }
     }

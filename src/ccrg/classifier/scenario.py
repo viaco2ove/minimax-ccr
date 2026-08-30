@@ -51,21 +51,48 @@ class ScenarioClassifier:
         return None
 
     def _has_compact(self, request: dict) -> bool:
-        """检查是否包含 /compact 命令（仅检查最后一条 user 消息，避免历史消息干扰）"""
+        """检查是否为"纯 /compact 命令"（仅检查最后一条 user 消息，避免历史消息干扰）。
+
+        新版 Claude Code 会把 /compact 命令、执行回显及后续用户真实发言合并进
+        同一条 user 消息（如 req_cfd6a5cc：block[3] 为命令包装、block[5]="继续"
+        为真实发言）。仅当除命令包装/系统回显块外无真实用户发言时，才判定为
+        compact，避免用户后续发言被吞、跳过意图分析。
+        """
+        system_markers = (
+            "<command-name>", "<command-message>", "<command-args>",
+            "<local-command-stdout>", "<local-command-caveat>",
+            "[Request interrupted by user]", "<system-reminder>",
+        )
         messages = request.get("messages", [])
         # 只检查最后一条 user 消息，避免历史消息中的 /compact 影响后续请求
         for msg in reversed(messages):
             if msg.get("role") != "user":
                 continue
             content = msg.get("content", "")
+            texts: list[str] = []
             if isinstance(content, str):
-                if "/compact" in content:
-                    return True
+                texts = [content]
             elif isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        if "/compact" in block.get("text", ""):
-                            return True
+                texts = [
+                    b.get("text", "")
+                    for b in content
+                    if isinstance(b, dict) and b.get("type") == "text"
+                ]
+
+            has_compact_cmd = False
+            has_real_speech = False
+            for t in texts:
+                if "/compact" in t:
+                    has_compact_cmd = True
+                stripped = t.strip()
+                if not stripped:
+                    continue
+                if any(m in stripped for m in system_markers):
+                    continue
+                has_real_speech = True
+
+            if has_compact_cmd:
+                return not has_real_speech
             break  # 只检查最后一条 user 消息
         return False
 
