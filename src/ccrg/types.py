@@ -101,6 +101,7 @@ class WorkflowConfig:
     chat_intention: list[str] | str = "minimax:MiniMax-M2.7"
     analyze_plan: list[str] | str = "qianfan:qianfan-code-latest"
     execute_solve: list[str] | str = "minimax:MiniMax-M2.7"
+    workflow_splitter: dict = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict) -> "WorkflowConfig":
@@ -110,7 +111,16 @@ class WorkflowConfig:
             chat_intention=data.get("chat_intention", "minimax:MiniMax-M2.7"),
             analyze_plan=data.get("analyze_plan", data.get("problem_analyze", "qianfan:qianfan-code-latest")),
             execute_solve=data.get("execute_solve", "minimax:MiniMax-M2.7"),
+            workflow_splitter=data.get("workflow_splitter", {}),
         )
+
+    def get_workflow_splitter_config(self) -> dict:
+        """获取 workflow 独立 splitter 配置段"""
+        return self.workflow_splitter if isinstance(self.workflow_splitter, dict) else {}
+
+    def is_workflow_splitter_enabled(self) -> bool:
+        """workflow 独立 splitter 是否启用"""
+        return bool(self.get_workflow_splitter_config().get("enabled", False))
 
     def get_intention_analyze_list(self) -> list[str]:
         """获取 intention_analyze 列表"""

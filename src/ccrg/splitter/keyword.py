@@ -46,6 +46,7 @@ class KeywordSplitter(Splitter):
                 matched_rule="keyword_routing",
                 matched_reason=f"keywords={matched}",
                 fallback=fallback,
+                workflow_stage="intention_analyze",
             )
 
         if chat_score > 0:
@@ -58,6 +59,7 @@ class KeywordSplitter(Splitter):
                 matched_rule="keyword_routing",
                 matched_reason=f"keywords={matched}",
                 fallback=fallback,
+                workflow_stage="chat_intention",
             )
 
         # 未命中，返回 default
@@ -68,6 +70,7 @@ class KeywordSplitter(Splitter):
             matched_rule="keyword_routing",
             matched_reason="no_keywords_matched",
             fallback=None,
+            workflow_stage=None,
         )
 
     def _resolve_route(self, intent: str, rules: list[dict]) -> tuple[str, list[str] | None]:

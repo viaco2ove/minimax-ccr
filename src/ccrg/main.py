@@ -73,6 +73,7 @@ _usage_stats = None
 _classifier_scenario = ScenarioClassifier()
 _classifier_tool = ToolTypeClassifier()
 _workflow_splitter: Splitter | None = None
+_workflow_stage_splitter: Splitter | None = None
 _provider_semaphores: dict[str, asyncio.Semaphore] = {}
 _provider_last_request_time: dict[str, float] = {}
 
@@ -250,7 +251,7 @@ setInterval(loadStats,30000);
 
 def init_app(config_path: str | None = None) -> FastAPI:
     """初始化 FastAPI 应用"""
-    global _config, _registry, _routing_engine, _usage_stats, app, _workflow_splitter
+    global _config, _registry, _routing_engine, _usage_stats, app, _workflow_splitter, _workflow_stage_splitter
 
     _config = load_config(config_path)
     _registry = ProviderRegistry(_config)
@@ -283,6 +284,48 @@ def init_app(config_path: str | None = None) -> FastAPI:
                 )
             else:
                 logger.info("[SemanticSplitterLocal] 模型预加载完成")
+
+    # 创建独立的 workflow 阶段 splitter（与共享 _workflow_splitter 分开）
+    # 依据 workflow.workflow_splitter 配置（enabled/active_strategy/semantic_splitter/llm_splitter）
+    # 判断当前属于哪个 workflow 阶段；未启用时保持 None（向后兼容旧逻辑）。
+    _workflow_stage_splitter = None
+    workflow_splitter_cfg = _config.workflow.get_workflow_splitter_config()
+    if _config.workflow.is_workflow_splitter_enabled() and workflow_splitter_cfg:
+        wf_active_strategy = workflow_splitter_cfg.get("active_strategy", "keyword_splitter")
+        # 构造浅拷贝 config 字典，把 workflow_splitter 整段注入为 config["routing"]["splitter"]
+        # （routing.keyword_routing / default / providers 等其余内容保留），避免污染共享 _config.__dict__
+        wf_config = dict(_config.__dict__) if hasattr(_config, "__dict__") else {}
+        wf_config["routing"] = dict(_config.routing)
+        wf_config["routing"]["splitter"] = workflow_splitter_cfg
+        try:
+            _workflow_stage_splitter = SplitterFactory.create(
+                active_strategy=wf_active_strategy,
+                config=wf_config,
+                keywords=_config.keywords,
+                registry=_registry,
+                usage_stats=_usage_stats,
+            )
+            # 预加载 semantic 模型（避免第一次请求时才下载）
+            if wf_active_strategy == "semantic_splitter":
+                logger.info("[WorkflowStageSplitter] 预加载 semantic 模型中...")
+                try:
+                    _workflow_stage_splitter._load_model()
+                except Exception as e:
+                    logger.error(f"[WorkflowStageSplitter] 模型预加载失败: {e}（语义分块将降级为关键词路由，首请求也会按需重试加载）")
+                else:
+                    if getattr(_workflow_stage_splitter, "_model", None) is None:
+                        logger.warning(
+                            "[WorkflowStageSplitter] 预加载未实际加载模型（可能 sentence_transformers 缺失），"
+                            "语义分块将降级为关键词路由"
+                        )
+                    else:
+                        logger.info("[WorkflowStageSplitter] 模型预加载完成")
+            logger.info(f"[WorkflowStageSplitter] created: active_strategy={wf_active_strategy}")
+        except Exception as e:
+            logger.error(f"[WorkflowStageSplitter] 创建失败: {e}，将回退到 _infer_stage_from_context")
+            _workflow_stage_splitter = None
+    else:
+        logger.info("[WorkflowStageSplitter] workflow_splitter 未启用，独立阶段判定回退到上下文推断")
 
     # 初始化 per-provider 并发控制信号量
     global _provider_semaphores
@@ -1284,12 +1327,16 @@ def _detect_workflow_intent(body: dict, keywords: dict) -> RoutingDecision:
     <session> 中并要求生成 title）不需要语义意图路由，直接走标准默认路由，
     避免为无关请求加载昂贵的 embedding 模型（m3e-small / bge-m3）。
     """
-    global _workflow_splitter, _config
+    global _workflow_splitter, _workflow_stage_splitter, _config
     if _is_title_generation_request(body):
         default = (_config.routing.get("default", "minimax:MiniMax-M2.7")
                    if _config else "minimax:MiniMax-M2.7")
         logger.info("[_detect_workflow_intent] title/summary request, skip semantic splitter, route=default")
         return RoutingDecision(intent="chat", route=default, matched_rule="non_workflow_bypass")
+    # 优先使用独立的 workflow 阶段 splitter（workflow.workflow_splitter 配置创建）
+    if _workflow_stage_splitter is not None:
+        return _workflow_stage_splitter.detect(body)
+    # 其次使用共享 splitter
     if _workflow_splitter is not None:
         return _workflow_splitter.detect(body)
     # Fallback: 旧逻辑（不应该走到这里）
@@ -1299,6 +1346,26 @@ def _detect_workflow_intent(body: dict, keywords: dict) -> RoutingDecision:
     intent = splitter.detect_intent(body)
     default = "minimax:MiniMax-M2.7"
     return RoutingDecision(intent=intent, route=default, matched_rule="workflow_splitter_fallback")
+
+
+def _detect_workflow_stage(body: dict) -> str:
+    """基于独立的 workflow splitter 判定当前 workflow 阶段。
+
+    优先用 _workflow_stage_splitter.detect(body) 的 workflow_stage 字段判定；
+    异常或为空则回退 _infer_stage_from_context(body)。
+    """
+    global _workflow_stage_splitter
+    if _workflow_stage_splitter is not None:
+        try:
+            decision = _workflow_stage_splitter.detect(body)
+            stage = getattr(decision, "workflow_stage", None)
+            if stage:
+                logger.info(f"[_detect_workflow_stage] splitter 判定 workflow_stage={stage}")
+                return stage
+            logger.info("[_detect_workflow_stage] splitter 未命中 workflow_stage，回退上下文推断")
+        except Exception as e:
+            logger.warning(f"[_detect_workflow_stage] splitter 判定失败: {e}，回退上下文推断")
+    return _infer_stage_from_context(body)
 
 
 def _resolve_execute_route(body: dict, request_id: str, stage: str = "execute_solve") -> str:
@@ -2605,8 +2672,9 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
             if is_user_initiated:
                 stage = "intention_analyze"  # 用户输入 -> 意图分析（每次都走）
             else:
-                # 工具回调：从 conversation 内容推断当前阶段
-                stage = _infer_stage_from_context(body)
+                # AI 自身后续请求（工具回调等非用户发言）：用独立 workflow_splitter 判断阶段，
+                # 无法判定时回退 _infer_stage_from_context
+                stage = _detect_workflow_stage(body)
 
             logger.info(f"[{request_id}] Workflow stage (auto-detected): {stage}")
         else:

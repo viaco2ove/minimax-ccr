@@ -10,7 +10,7 @@ from typing import Any
 
 import numpy as np
 
-from .base import RoutingDecision, Splitter
+from .base import RoutingDecision, Splitter, resolve_workflow_stage
 
 logger = logging.getLogger("ccrg")
 
@@ -28,6 +28,7 @@ class SemanticSplitterLocal(Splitter):
         self.threshold = cfg.get("threshold", 0.5)
         self.device = cfg.get("device", "cpu")
         self.trust_remote_code = cfg.get("trust_remote_code", False)
+        self.hf_endpoint = cfg.get("hf_endpoint", "")
         self._model = None
         # 模型加载曾失败（如打包/frozen 环境 sentence_transformers 不可用，或 import 触发原生崩溃）
         # 则永远不再尝试加载，避免单次请求反复 import 把整个进程拖死（闪退）。
@@ -72,13 +73,17 @@ class SemanticSplitterLocal(Splitter):
         # 根据命中关键词解析路由
         route_str, fb, intent = self._resolve_route_from_keywords(matched, best_scores)
 
-        logger.debug(f"[SemanticSplitterLocal] matched :{intent} , route_str:{route_str}, fb:{fb}")
+        # 按最高分 category 映射 workflow_stage（无命中或低于阈值留 None）
+        workflow_stage = resolve_workflow_stage(best_scores, threshold=self.threshold)
+
+        logger.debug(f"[SemanticSplitterLocal] matched :{intent} , route_str:{route_str}, fb:{fb}, workflow_stage:{workflow_stage}")
         return RoutingDecision(
             intent=intent,
             route=route_str,
             matched_rule="semantic_routing",
             matched_reason=f"keywords={matched}" if matched else "no_match",
             fallback=fb,
+            workflow_stage=workflow_stage,
         )
 
     def _match_keywords(self, model, user_emb: np.ndarray) -> dict:
@@ -239,6 +244,8 @@ class SemanticSplitterLocal(Splitter):
                     self._model = SentenceTransformer(local_path, **kwargs)
                 else:
                     # 无缓存：联网下载
+                    if self.hf_endpoint:
+                        os.environ["HF_ENDPOINT"] = self.hf_endpoint
                     kwargs = {"device": self.device}
                     if self.trust_remote_code:
                         kwargs["trust_remote_code"] = True
@@ -255,6 +262,8 @@ class SemanticSplitterLocal(Splitter):
                 # 重试前必须关掉离线模式，否则无法联网下载
                 os.environ.pop("HF_HUB_OFFLINE", None)
                 os.environ.pop("TRANSFORMERS_OFFLINE", None)
+                if self.hf_endpoint:
+                    os.environ["HF_ENDPOINT"] = self.hf_endpoint
                 try:
                     from huggingface_hub import snapshot_download
                     local_path = snapshot_download(

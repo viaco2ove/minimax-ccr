@@ -14,7 +14,7 @@ from typing import Any
 
 import httpx
 
-from .base import RoutingDecision, Splitter
+from .base import RoutingDecision, Splitter, resolve_workflow_stage
 from ..log.log_controller import verbose_log
 
 logger = logging.getLogger("ccrg")
@@ -142,10 +142,16 @@ class LLMSplitter(Splitter):
                     matched = self._parse_llm_response(result)
                     verbose_log("LLMSplitter", f"parsed matched: {matched}", "LLM_SPLITTER_DEBUG")
                     route_str, fb, intent = self._resolve_route_from_keywords(matched)
+                    # 按最高分 category 映射 workflow_stage（llm 用 matched 中每类最高分）
+                    category_scores = {
+                        cat: max((s for _, s in items), default=0.0)
+                        for cat, items in matched.items()
+                    }
+                    workflow_stage = resolve_workflow_stage(category_scores)
                     # matched 可能是空 dict，也是有效结果
                     logger.info(
                         f"[LLMSplitter] <<< 成功 route={route} | 耗时={elapsed:.1f}s | "
-                        f"matched={matched} | intent={intent} | 最终route={route_str}"
+                        f"matched={matched} | intent={intent} | 最终route={route_str} | workflow_stage={workflow_stage}"
                     )
                     return RoutingDecision(
                         intent=intent,
@@ -153,6 +159,7 @@ class LLMSplitter(Splitter):
                         matched_rule="llm_routing",
                         matched_reason=f"keywords={matched}" if matched else "no_match",
                         fallback=fb,
+                        workflow_stage=workflow_stage,
                     )
                 logger.info(f"[LLMSplitter] <<< route={route} 返回空结果，继续下一个 | elapsed={elapsed:.1f}s")
             except Exception as e:
