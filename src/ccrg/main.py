@@ -292,14 +292,13 @@ def init_app(config_path: str | None = None) -> FastAPI:
     workflow_splitter_cfg = _config.workflow.get_workflow_splitter_config()
     if _config.workflow.is_workflow_splitter_enabled() and workflow_splitter_cfg:
         wf_active_strategy = workflow_splitter_cfg.get("active_strategy", "keyword_splitter")
-        # 构造浅拷贝 config 字典，把 workflow_splitter 整段注入为 config["routing"]["splitter"]
-        # （routing.keyword_routing / default / providers 等其余内容保留），避免污染共享 _config.__dict__
+        # 构造浅拷贝 config 字典（routing / providers 等其余内容保留），
+        # 由 WorkflowSplitter 内部从 workflow.workflow_splitter 读取自身配置，
+        # 不再注入 config["routing"]["splitter"]，不复用下级 splitter 代码
         wf_config = dict(_config.__dict__) if hasattr(_config, "__dict__") else {}
         wf_config["routing"] = dict(_config.routing)
-        wf_config["routing"]["splitter"] = workflow_splitter_cfg
         try:
-            _workflow_stage_splitter = SplitterFactory.create(
-                active_strategy=wf_active_strategy,
+            _workflow_stage_splitter = WorkflowSplitter(
                 config=wf_config,
                 keywords=_config.keywords,
                 registry=_registry,
@@ -392,6 +391,37 @@ def init_app(config_path: str | None = None) -> FastAPI:
     @app.post("/v1/messages")
     async def handle_messages(request: Request):
         return await _handle_request(request)
+
+
+    @app.post("/v1/responses")
+    async def handle_responses(request: Request):
+        """Anthropic Responses API 端点（与 /v1/messages 等价）"""
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"type": "invalid_request", "message": "Invalid JSON"}}
+            )
+
+        # /v1/responses 请求结构：body.input.messages
+        # 转换为 CCRG 内部格式：body.messages（与 /v1/messages 相同）
+        if "input" in body and isinstance(body["input"], dict):
+            body["messages"] = body.pop("input").get("messages", [])
+
+        logger.debug(f"[RESPONSES] model={body.get('model')}, stream={body.get('stream')}")
+
+        # 复用 /v1/messages 的处理逻辑
+        # 构造 FakeRequest 避免重复读取 body 流
+        class FakeRequest:
+            def __init__(self, json_body):
+                self._json = json_body
+
+            async def json(self):
+                return self._json
+
+        fake = FakeRequest(body)
+        return await _handle_request(fake)
 
     @app.post("/v1/chat/completions")
     async def handle_chat_completions(request: Request):
@@ -1341,8 +1371,7 @@ def _detect_workflow_intent(body: dict, keywords: dict) -> RoutingDecision:
         return _workflow_splitter.detect(body)
     # Fallback: 旧逻辑（不应该走到这里）
     from .splitter.workflow import WorkflowSplitter
-    splitter = WorkflowSplitter(keywords)
-    # 旧 WorkflowSplitter 返回 str，需要包装
+    splitter = WorkflowSplitter(config={}, keywords=keywords)
     intent = splitter.detect_intent(body)
     default = "minimax:MiniMax-M2.7"
     return RoutingDecision(intent=intent, route=default, matched_rule="workflow_splitter_fallback")
