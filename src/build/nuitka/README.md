@@ -57,7 +57,7 @@ $conda_envs = "{conda_envs}"
 
 ```cmd
 :: 设置变量（当前会话生效）
-set conda_envs={onda_envs}
+set conda_envs={conda_envs}
 
 :: 使用变量执行
 %conda_envs%\python.exe src\build\nuitka\build_nuitka.py
@@ -68,7 +68,10 @@ set conda_envs={onda_envs}
 打包 + 后处理完成后，自动把完整 dist 复制到 dist_nu/ccrg_update，
 并剔除所有运行时数据——.gateway.json、keywords.json、logs/、faulthandler.log、*.db
 build_nuitka.py --update
+cmd:
 %conda_envs%\python.exe src\build\nuitka\build_nuitka.py --update
+powershell
+& $conda_envs/python.exe src\build\nuitka\build_nuitka.py --update
 
 ### 或先 `cd` 到项目根再运行：
 

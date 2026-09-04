@@ -36,6 +36,8 @@ class LLMSplitter(Splitter):
     USER_PROMPT_TEMPLATE = ""
 
     def __init__(self, config: dict[str, Any] | None, keywords: dict, registry: Any = None, usage_stats: Any = None):
+        super().__init__(usage_stats=usage_stats)
+        self.splitter_type = "llm"
         self.config = config or {}
         self.keywords = keywords
         self.registry = registry
@@ -122,9 +124,12 @@ class LLMSplitter(Splitter):
 
     def detect(self, body: dict) -> RoutingDecision:
         """使用 LLM 分析关键词并返回路由决策"""
+        detect_start = _time.time()
         user_content = self._extract_user_text(body)
         if not user_content.strip():
-            return self._keyword_fallback(body)
+            decision = self._keyword_fallback(body)
+            self._record(decision, (_time.time() - detect_start) * 1000)
+            return decision
 
         for route in self.routes:
             start = _time.time()
@@ -153,7 +158,7 @@ class LLMSplitter(Splitter):
                         f"[LLMSplitter] <<< 成功 route={route} | 耗时={elapsed:.1f}s | "
                         f"matched={matched} | intent={intent} | 最终route={route_str} | workflow_stage={workflow_stage}"
                     )
-                    return RoutingDecision(
+                    decision = RoutingDecision(
                         intent=intent,
                         route=route_str,
                         matched_rule="llm_routing",
@@ -161,6 +166,8 @@ class LLMSplitter(Splitter):
                         fallback=fb,
                         workflow_stage=workflow_stage,
                     )
+                    self._record(decision, (_time.time() - detect_start) * 1000)
+                    return decision
                 logger.info(f"[LLMSplitter] <<< route={route} 返回空结果，继续下一个 | elapsed={elapsed:.1f}s")
             except Exception as e:
                 import traceback
@@ -171,7 +178,9 @@ class LLMSplitter(Splitter):
 
         logger.info("[LLMSplitter] 所有 route 均失败，回退到 keyword fallback")
         verbose_log("LLMSplitter", "all routes failed, using keyword fallback", "LLM_SPLITTER_DEBUG")
-        return self._keyword_fallback(body)
+        decision = self._keyword_fallback(body)
+        self._record(decision, (_time.time() - detect_start) * 1000)
+        return decision
 
     def _parse_llm_response(self, text: str) -> dict:
         """解析 LLM 返回的 JSON，直接返回 categories -> [(kw, score)] 结构，对齐 semantic_splitter"""

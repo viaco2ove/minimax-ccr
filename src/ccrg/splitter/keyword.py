@@ -15,12 +15,16 @@ class KeywordSplitter(Splitter):
     """基于关键词检测工作流意图 — 取代 keyword_routing"""
 
     def __init__(self, config: dict[str, Any] | None, keywords: dict, registry: Any = None, usage_stats: Any = None):
+        super().__init__(usage_stats=usage_stats)
+        self.splitter_type = "keyword"
         self.keywords = keywords
         self.config = config or {}
         # usage_stats 不用于 keyword_splitter
 
     def detect(self, body: dict) -> RoutingDecision:
         """检测用户意图并返回完整路由决策"""
+        import time as _time
+        start = _time.time()
         workflow_keywords = self.keywords.get("workflow_intent", {})
         chat_keywords = workflow_keywords.get("chat_intention", [])
         task_keywords = workflow_keywords.get("intention_analyze", [])
@@ -40,7 +44,7 @@ class KeywordSplitter(Splitter):
                 matched = [kw for kw in task_keywords if self._word_match(kw, user_text)]
                 logger.info(f"KeywordSplitter matched task keywords: {matched}")
             route, fallback = self._resolve_route("task", rules)
-            return RoutingDecision(
+            decision = RoutingDecision(
                 intent="task",
                 route=route,
                 matched_rule="keyword_routing",
@@ -48,12 +52,14 @@ class KeywordSplitter(Splitter):
                 fallback=fallback,
                 workflow_stage="intention_analyze",
             )
+            self._record(decision, (_time.time() - start) * 1000)
+            return decision
 
         if chat_score > 0:
             matched = [kw for kw in chat_keywords if self._word_match(kw, user_text)]
             logger.info(f"KeywordSplitter matched chat keywords: {matched}")
             route, fallback = self._resolve_route("chat", rules)
-            return RoutingDecision(
+            decision = RoutingDecision(
                 intent="chat",
                 route=route,
                 matched_rule="keyword_routing",
@@ -61,10 +67,12 @@ class KeywordSplitter(Splitter):
                 fallback=fallback,
                 workflow_stage="chat_intention",
             )
+            self._record(decision, (_time.time() - start) * 1000)
+            return decision
 
         # 未命中，返回 default
         default = self.config.get("routing", {}).get("default", "minimax:MiniMax-M2.7")
-        return RoutingDecision(
+        decision = RoutingDecision(
             intent="chat",
             route=default,
             matched_rule="keyword_routing",
@@ -72,6 +80,8 @@ class KeywordSplitter(Splitter):
             fallback=None,
             workflow_stage=None,
         )
+        self._record(decision, (_time.time() - start) * 1000)
+        return decision
 
     def _resolve_route(self, intent: str, rules: list[dict]) -> tuple[str, list[str] | None]:
         """从 keyword_routing.rules 中找到 intent 对应的路由"""

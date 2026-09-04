@@ -4,7 +4,7 @@ Splitter 模块基类。
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 
 # workflow 阶段分类映射表：splitter category → workflow_stage
@@ -51,6 +51,14 @@ class RoutingDecision:
 class Splitter(ABC):
     """分流器抽象基类 — 取代 keyword_routing"""
 
+    # 子类可设置：当前 splitter 类型名（用于 usage_stats 记录 model 字段）
+    splitter_type: str = "unknown"
+
+    def __init__(self, usage_stats: Any = None):
+        # usage_stats 由 SplitterFactory 注入；splitter 自身不直接计 token，
+        # 但会记录"被调用一次"以便观察 llm_splitter / semantic 等是否实际被使用。
+        self.usage_stats = usage_stats
+
     @abstractmethod
     def detect(self, body: dict) -> RoutingDecision:
         """根据请求内容决定路由
@@ -62,3 +70,35 @@ class Splitter(ABC):
             RoutingDecision: 包含意图、路由目标、匹配规则
         """
         ...
+
+    def _record(self, decision: RoutingDecision, latency_ms: float, success: bool = True) -> None:
+        """记录 splitter 调用到 usage_stats
+
+        Args:
+            decision: 路由决策（用于提取 matched_rule / matched_keyword）
+            latency_ms: splitter 处理耗时
+            success: 是否成功生成决策（fallback 也算成功）
+        """
+        if not self.usage_stats:
+            return
+
+        matched_keyword = ""
+        if decision.matched_reason.startswith("keywords="):
+            matched_keyword = decision.matched_reason[len("keywords="):]
+        else:
+            matched_keyword = decision.matched_reason or ""
+
+        try:
+            self.usage_stats.record(
+                provider="splitter",
+                model=self.splitter_type,
+                input_tokens=0,
+                output_tokens=0,
+                latency_ms=latency_ms,
+                success=1 if success else 0,
+                route_rule=decision.matched_rule or self.splitter_type,
+                matched_keyword=matched_keyword,
+                matched_rule=decision.matched_rule or "",
+            )
+        except Exception:
+            pass

@@ -19,6 +19,8 @@ class SemanticSplitterLocal(Splitter):
     """使用本地 sentence-transformers 模型做语义分流"""
 
     def __init__(self, config: dict[str, Any] | None, keywords: dict, registry: Any = None, usage_stats: Any = None):
+        super().__init__(usage_stats=usage_stats)
+        self.splitter_type = "semantic_local"
         self.keywords = keywords
         self.config = config or {}
         # usage_stats 不用于 semantic_local
@@ -44,25 +46,35 @@ class SemanticSplitterLocal(Splitter):
     def detect(self, body: dict) -> RoutingDecision:
         """基于语义向量匹配关键词并返回路由决策"""
         import traceback
+        import time as _time
+        start = _time.time()
         msgs = body.get("messages", [])
         logger.debug(f"[SemanticSplitterLocal] body: {len(msgs)} messages")
         text = self._extract_user_text(body)
         if not text.strip():
-            return self._keyword_fallback(body)
+            decision = self._keyword_fallback(body)
+            self._record(decision, (_time.time() - start) * 1000)
+            return decision
 
         # 模型曾加载失败（如打包/frozen 环境 sentence_transformers 不可用，或 import 时触发原生崩溃）：
         # 直接降级 keyword 路由，绝不再尝试加载，避免单次请求反复 import 把整个进程拖死（闪退）。
         if self._load_failed:
-            return self._keyword_fallback(body)
+            decision = self._keyword_fallback(body)
+            self._record(decision, (_time.time() - start) * 1000)
+            return decision
         model = self._load_model()
         if model is None:
-            return self._keyword_fallback(body)
+            decision = self._keyword_fallback(body)
+            self._record(decision, (_time.time() - start) * 1000)
+            return decision
 
         try:
             user_emb = model.encode(text)
         except Exception as e:
             logger.error(f"[SemanticSplitterLocal] model.encode failed: {e}\n{traceback.format_exc()}")
-            return self._keyword_fallback(body)
+            decision = self._keyword_fallback(body)
+            self._record(decision, (_time.time() - start) * 1000)
+            return decision
 
         # 遍历所有关键词，计算相似度，找出命中的关键词
         matched = self._match_keywords(model, user_emb)
@@ -77,7 +89,7 @@ class SemanticSplitterLocal(Splitter):
         workflow_stage = resolve_workflow_stage(best_scores, threshold=self.threshold)
 
         logger.debug(f"[SemanticSplitterLocal] matched :{intent} , route_str:{route_str}, fb:{fb}, workflow_stage:{workflow_stage}")
-        return RoutingDecision(
+        decision = RoutingDecision(
             intent=intent,
             route=route_str,
             matched_rule="semantic_routing",
@@ -85,6 +97,8 @@ class SemanticSplitterLocal(Splitter):
             fallback=fb,
             workflow_stage=workflow_stage,
         )
+        self._record(decision, (_time.time() - start) * 1000)
+        return decision
 
     def _match_keywords(self, model, user_emb: np.ndarray) -> dict:
         """计算用户输入与每个关键词的相似度，返回每个 category 相似度最高的关键词"""
