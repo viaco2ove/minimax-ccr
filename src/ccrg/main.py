@@ -1449,6 +1449,21 @@ def _get_stage_routes(stage: str, body: dict = None) -> tuple[list[str], str, di
             logger.info(f"/compact request detected, routing to {route}")
             return [route] + fallback, "compact", _meta("scenario.compact")
 
+        if _is_toolssearch_request(body):
+            matched = _match_tool_routing_for_body(body)
+            if matched:
+                route_str, fb, rule_name = matched
+                logger.info(f"[toolsearch] request detected, routing to {route_str} via {rule_name}")
+                return [route_str] + list(fb or []), "tool_routing", _meta(f"tool_routing.{rule_name}")
+            # 没匹配到 rule：fallback 到默认 tool 路由
+            fallback_rule = _config.routing.get("tool_routing", {}).get("cheap_tasks") or {}
+            route = fallback_rule.get("route", "minimax_long:MiniMax-M3")
+            fb = fallback_rule.get("fallback", [])
+            logger.info(f"[toolsearch] request detected (no matching rule), fallback to {route}")
+            return [route] + fb, "tool_routing", _meta("tool_routing.cheap_tasks")
+
+
+
         # scenario 检测（long_context / image）
         try:
             tags = _classify_request(body)
@@ -1928,6 +1943,23 @@ _COMPACT_SYSTEM_MARKERS = (
     "<system-reminder>",
 )
 
+# 全量标记：紧凑标记 + 工具结果/系统指令块等更长模式
+_ALL_SYSTEM_MARKERS = (
+    # 继承紧凑标记
+    *(_COMPACT_SYSTEM_MARKERS),
+    # 工具结果
+    "Tool Results:",
+    "<tool-result>",
+    "</tool-result>",
+    # 系统指令块
+    "Memory:",
+    "memory:",
+    "Skills:",
+    "skills:",
+    "General:",
+    "general:",
+)
+
 
 def _is_pure_compact_request(body: dict) -> bool:
     """判断请求是否是"纯 /compact 命令"。
@@ -1972,6 +2004,96 @@ def _is_pure_compact_request(body: dict) -> bool:
         break  # 只检查最后一条 user 消息
     return False
 
+
+def _is_toolssearch_request(body: dict) -> bool:
+    """判断请求是否是 toolsearch（系统自动触发的 ToolSearch 调用，而非用户主动发言）"""
+    messages = body.get("messages", [])
+
+    # 1. 找到最后一条 user 消息
+    last_user_msg = None
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            last_user_msg = msg
+            break
+    if last_user_msg is None:
+        return False
+
+    # 2. 提取所有 text 段
+    content = last_user_msg.get("content", "")
+    if isinstance(content, str):
+        texts = [content]
+    elif isinstance(content, list):
+        texts = [
+            b.get("text", "")
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
+        ]
+    else:
+        texts = []
+
+    # 3. 逐段分类：ToolSearch 命令 / 系统标记 / 用户真实发言
+    has_toolsearch_cmd = False
+    has_real_speech = False
+
+    for t in texts:
+        if "Tool: ToolSearch" in t:
+            has_toolsearch_cmd = True
+            continue  # ToolSearch 命令本身不算用户发言
+
+        stripped = t.strip()
+        if not stripped:
+            continue
+        if any(marker in stripped for marker in _ALL_SYSTEM_MARKERS):
+            continue  # 系统注入的标记不算用户发言
+
+        has_real_speech = True  # 这是用户自己说的话
+
+    # 4. 只有"纯系统注入"的 ToolSearch 才算
+    return has_toolsearch_cmd and not has_real_speech
+
+
+def _match_tool_routing_for_body(body: dict) -> tuple[str, list[str] | None, str] | None:
+    """扫描 tool_routing 配置，按请求中 tool 名称匹配，返回第一个命中的 (route, fallback, rule_name)。
+
+    - 工具名从 request 的 tools 字段读（Anthropic 格式）
+    - 也兼容从最近一条 assistant 消息的 tool_use 块读取
+    - tool_routing 中每个 rule 的 match 字段是允许的 tool 名列表
+    """
+    tool_names: set[str] = set()
+
+    # 1. 从 body.tools 提取（请求里明确声明的工具）
+    for tool in body.get("tools", []) or []:
+        if isinstance(tool, dict):
+            name = tool.get("name")
+            if name:
+                tool_names.add(name)
+
+    # 2. 从最近 assistant 消息的 tool_use 块提取（实际使用过的工具）
+    for msg in reversed(body.get("messages", []) or []):
+        if msg.get("role") != "assistant":
+            continue
+        for block in msg.get("content", []) or []:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                name = block.get("name")
+                if name:
+                    tool_names.add(name)
+        break
+
+    if not tool_names:
+        return None
+
+    tool_routing_cfg = _config.routing.get("tool_routing", {}) if _config else {}
+    for rule_name, rule in tool_routing_cfg.items():
+        if rule_name.startswith("_"):  # 跳过 _default 之类
+            continue
+        match_list = rule.get("match", []) or []
+        if any(name in match_list for name in tool_names):
+            route_str = rule.get("route", "")
+            if ":" not in route_str:
+                continue
+            return route_str, rule.get("fallback"), rule_name
+
+    return None
 
 def _estimate_messages_tokens(messages: list) -> int:
     """估算 messages 的 token 数（简化实现：字符数 / 4）"""
