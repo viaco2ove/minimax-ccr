@@ -1455,7 +1455,7 @@ def _get_stage_routes(stage: str, body: dict = None) -> tuple[list[str], str, di
                 route_str, fb, rule_name = matched
                 logger.info(f"[toolsearch] request detected, routing to {route_str} via {rule_name}")
                 return [route_str] + list(fb or []), "tool_routing", _meta(f"tool_routing.{rule_name}")
-            # 没匹配到 rule：fallback 到默认 tool 路由
+            # 没匹配到 rule：fallback 到 cheap_tasks
             fallback_rule = _config.routing.get("tool_routing", {}).get("cheap_tasks") or {}
             route = fallback_rule.get("route", "minimax_long:MiniMax-M3")
             fb = fallback_rule.get("fallback", [])

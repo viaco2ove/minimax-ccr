@@ -277,13 +277,13 @@ class WorkflowLLMStrategy:
     def _get_adapter_for_provider(self, provider_name: str, prov_config: Any):
         adapter_name = getattr(prov_config, "providers_adapter", "") or getattr(prov_config, "protocol", "")
         if adapter_name == "minimax":
-            from ..protocol.minimax_adapter import MiniMaxAdapter
+            from ccrg.protocol.minimax_adapter import MiniMaxAdapter
             return MiniMaxAdapter()
         elif adapter_name == "openai":
-            from ..protocol.openai_adapter import OpenAIAdapter
+            from ccrg.protocol.openai_adapter import OpenAIAdapter
             return OpenAIAdapter()
         else:
-            from ..protocol.anthropic_adapter import AnthropicAdapter
+            from ccrg.protocol.anthropic_adapter import AnthropicAdapter
             return AnthropicAdapter()
 
     def _keyword_fallback(self, body: dict) -> RoutingDecision:
