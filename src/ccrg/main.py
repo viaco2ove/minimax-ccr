@@ -1449,7 +1449,7 @@ def _get_stage_routes(stage: str, body: dict = None) -> tuple[list[str], str, di
             logger.info(f"/compact request detected, routing to {route}")
             return [route] + fallback, "compact", _meta("scenario.compact")
 
-        if _is_toolssearch_request(body):
+        if _is_toolssearch_request(body, False):
             matched = _match_tool_routing_for_body(body)
             if matched:
                 route_str, fb, rule_name = matched
@@ -2005,51 +2005,40 @@ def _is_pure_compact_request(body: dict) -> bool:
     return False
 
 
-def _is_toolssearch_request(body: dict) -> bool:
-    """判断请求是否是 toolsearch（系统自动触发的 ToolSearch 调用，而非用户主动发言）"""
+def _is_toolssearch_request(body: dict, strict: bool = False) -> bool:
     messages = body.get("messages", [])
-
-    # 1. 找到最后一条 user 消息
-    last_user_msg = None
     for msg in reversed(messages):
-        if msg.get("role") == "user":
-            last_user_msg = msg
-            break
-    if last_user_msg is None:
-        return False
-
-    # 2. 提取所有 text 段
-    content = last_user_msg.get("content", "")
-    if isinstance(content, str):
-        texts = [content]
-    elif isinstance(content, list):
-        texts = [
-            b.get("text", "")
-            for b in content
-            if isinstance(b, dict) and b.get("type") == "text"
-        ]
-    else:
-        texts = []
-
-    # 3. 逐段分类：ToolSearch 命令 / 系统标记 / 用户真实发言
-    has_toolsearch_cmd = False
-    has_real_speech = False
-
-    for t in texts:
-        if "Tool: ToolSearch" in t:
-            has_toolsearch_cmd = True
-            continue  # ToolSearch 命令本身不算用户发言
-
-        stripped = t.strip()
-        if not stripped:
+        if msg.get("role") != "user":
             continue
-        if any(marker in stripped for marker in _ALL_SYSTEM_MARKERS):
-            continue  # 系统注入的标记不算用户发言
+        content = msg.get("content", "")
+        texts: list[str] = []
+        if isinstance(content, str):
+            texts = [content]
+        elif isinstance(content, list):
+            texts = [
+                b.get("text", "")
+                for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            ]
 
-        has_real_speech = True  # 这是用户自己说的话
+        has_compact_cmd = False
+        has_real_speech = False
+        for t in texts:
+            if "Tool: ToolSearch" in t:
+                has_compact_cmd = True
+            stripped = t.strip()
+            if not stripped:
+                continue
+            if any(m in stripped for m in _ALL_SYSTEM_MARKERS):
+                continue
+            has_real_speech = True
 
-    # 4. 只有"纯系统注入"的 ToolSearch 才算
-    return has_toolsearch_cmd and not has_real_speech
+        if has_compact_cmd and not strict:
+            return has_compact_cmd
+        if has_compact_cmd:
+            return not has_real_speech
+        break  # 只检查最后一条 user 消息
+    return False
 
 
 def _match_tool_routing_for_body(body: dict) -> tuple[str, list[str] | None, str] | None:
