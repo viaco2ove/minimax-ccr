@@ -74,6 +74,7 @@ class ProviderConfig:
     timeout_ms: int | None = None
     per_request_delay_ms: int | None = None
     providers_adapter: str = ""
+    reasoning_effort: str = ""
 
     @classmethod
     def from_dict(cls, name: str, data: dict) -> "ProviderConfig":
@@ -90,6 +91,7 @@ class ProviderConfig:
             timeout_ms=data.get("timeout_ms"),
             per_request_delay_ms=data.get("per_request_delay_ms"),
             providers_adapter=data.get("providers_adapter", ""),
+            reasoning_effort=data.get("reasoning_effort", ""),
         )
 
 

@@ -136,3 +136,29 @@ agent 设计 类似llm 分流器
 }
 ```
 如果返回的不是josn 直接当作分析失败
+
+##
+```
+      "local_model": {
+        "model_name": "Qwen3-0.6B",
+        "local_chat_model_run_start": true,
+        "gguf_file_name": "Qwen3-0.6B-Q8_0.gguf",
+        "local_dir": "local_models",
+        "model_scope_url": "https://www.modelscope.cn/models/Qwen/Qwen3-0.6B-GGUF/resolve/master/Qwen3-0.6B-Q8_0.gguf",
+        "hf_mirror_url": "https://hf-mirror.com/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf",
+        "hf_url": "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf",
+        "download_headers": {
+          "Cookie": "acw_tc=2f5c8ddc17816851321176544ec8ed3cd99ef88b714a184983656b35bae620; csrf_session=MTc4MTY4NTEzMnxEWDhFQVFMX2dBQUJFQUVRQUFBeV80QUFBUVp6ZEhKcGJtY01DZ0FJWTNOeVpsTmhiSFFHYzNSeWFXNW5EQklBRUVkb1kwMXJjRzQ1Ym5vM1p6RjJSemc9fIU0nt9VkelyDhMfF9E6el3ZZ-qMuV30zsyzz4jV_Rwv; csrf_token=S9Tvc8kD-yOrXx6l_n09-ooBgVY%3D"
+        },
+        "n_ctx": 15868,
+        "n_threads": 4,
+        "n_threads_batch": 4,
+        "n_batch": 128,
+        "n_ubatch": 128,
+        "use_mmap": true,
+        "mlock": false,
+        "type_k": "f16",
+        "type_v": "f16",
+        "max_tokens": 512
+      },
+```

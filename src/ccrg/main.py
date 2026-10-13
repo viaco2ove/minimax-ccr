@@ -1289,6 +1289,7 @@ def _provider_config_to_dict(provider: ProviderConfig) -> dict:
         "api_key": provider.api_key,
         "protocol": provider.protocol,
         "providers_adapter": provider.providers_adapter,
+        "reasoning_effort": provider.reasoning_effort,
         "models": provider.models,
         "capabilities": provider.capabilities,
         "cost_tier": provider.cost_tier,
