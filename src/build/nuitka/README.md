@@ -13,7 +13,7 @@ AIGC:
 
 Claude Code Router Gateway 的 Windows 独立 exe 打包流程。
 所有脚本集中在 `src/build/nuitka/`，统一从同目录 `nuitka.ini` 读取配置（路径、环境、端口均不硬编码）。
-
+conda_envs={[nuitka.ini](nuitka.ini)}.conda_envs 例如 C:\Users\xxx\.conda\envs\ccrg312
 ```PowerShell
 # 设置变量（当前会话生效）
 $conda_envs = "{conda_envs}"

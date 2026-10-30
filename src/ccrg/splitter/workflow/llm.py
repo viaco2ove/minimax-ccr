@@ -175,16 +175,22 @@ class WorkflowLLMStrategy:
         return self._call_via_registry(provider, model, user_content, prov_config)
 
     def _build_messages(self, user_content: str) -> list:
-        # 截断用户输入，避免 keyword_lib + 完整 cb_summary 作为 system 内容超出
-        # MiniMax anthropic 接口 8000 字符上限导致 400 invalid params（与 MiniMaxAdapter 对齐）
+        """构造 messages：用户输入放 user 消息（Anthropic 兼容接口要求 messages 以 user 开头）
+
+        system prompt 不再塞进 messages，改由顶层 system 字段传入（见 _build_system）。
+        """
         USER_CONTENT_LIMIT = 4000
-        SYSTEM_PROMPT_MAX = 7000
         if len(user_content) > USER_CONTENT_LIMIT:
             user_content = user_content[-USER_CONTENT_LIMIT:]  # 保留最近上下文
-        prompt = self.system_prompt.replace("[用户输入将在此处替换]", user_content)
+        return [{"role": "user", "content": user_content}]
+
+    def _build_system(self) -> str:
+        """构造顶层 system prompt（用户输入已在 user 消息中，占位符置空避免重复计 token）"""
+        SYSTEM_PROMPT_MAX = 7000
+        prompt = self.system_prompt.replace("[用户输入将在此处替换]", "")
         if len(prompt) > SYSTEM_PROMPT_MAX:
             prompt = prompt[:SYSTEM_PROMPT_MAX]  # 二次保险，保留头部 keyword_lib
-        return [{"role": "system", "content": prompt}]
+        return prompt
 
     def _call_via_registry(self, provider: str, model: str, user_content: str, prov_config: Any) -> str:
         adapter = self._get_adapter_for_provider(provider, prov_config)
@@ -203,6 +209,7 @@ class WorkflowLLMStrategy:
         messages = self._build_messages(user_content)
         req_body = {
             "model": model,
+            "system": self._build_system(),
             "messages": messages,
             "max_tokens": 500,
             "stream": False,
@@ -244,6 +251,7 @@ class WorkflowLLMStrategy:
         messages = self._build_messages(user_content)
         req_body = {
             "model": model,
+            "system": self._build_system(),
             "messages": messages,
             "max_tokens": 500,
             "stream": False,

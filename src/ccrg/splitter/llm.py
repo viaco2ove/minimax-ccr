@@ -551,11 +551,24 @@ class LLMSplitter(Splitter):
         return content
 
     def _build_messages(self, user_content: str) -> list:
-        """构建 messages 数组，用户输入替换进 system prompt"""
-        prompt = self.system_prompt.replace("[用户输入将在此处替换]", user_content)
+        """构建 messages：用户输入放 user 消息（Anthropic 兼容接口要求 messages 以 user 开头）
+
+        system prompt 不再塞进 messages，改由顶层 system 字段传入（见 _build_system）。
+        """
+        USER_CONTENT_LIMIT = 4000
+        if len(user_content) > USER_CONTENT_LIMIT:
+            user_content = user_content[-USER_CONTENT_LIMIT:]  # 保留最近上下文
         return [
-            {"role": "system", "content": prompt},
+            {"role": "user", "content": user_content},
         ]
+
+    def _build_system(self) -> str:
+        """构建顶层 system prompt（用户输入已在 user 消息中，占位符置空避免重复计 token）"""
+        SYSTEM_PROMPT_MAX = 7000
+        prompt = self.system_prompt.replace("[用户输入将在此处替换]", "")
+        if len(prompt) > SYSTEM_PROMPT_MAX:
+            prompt = prompt[:SYSTEM_PROMPT_MAX]  # 二次保险，保留头部 keyword_lib
+        return prompt
 
     def _call_via_registry(self, provider: str, model: str, user_content: str, prov_config: Any) -> str:
         adapter = self._get_adapter_for_provider(provider, prov_config)
@@ -576,6 +589,7 @@ class LLMSplitter(Splitter):
         verbose_log("LLMSplitter", "_build_messages end", "LLM_SPLITTER_DEBUG")
         req_body = {
             "model": model,
+            "system": self._build_system(),
             "messages": messages,
             "max_tokens": 500,
             "stream": False,
@@ -628,6 +642,7 @@ class LLMSplitter(Splitter):
 
         req_body = {
             "model": model,
+            "system": self._build_system(),
             "messages": messages,
             "max_tokens": 500,
             "stream": False,
