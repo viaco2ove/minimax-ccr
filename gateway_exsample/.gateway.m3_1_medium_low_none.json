@@ -5,6 +5,7 @@
     "timeout_ms": 600000,
     "log_level": "debug",
     "log_file": "logs/ccrg.log",
+    "described": "gateway.m3_1_low_m2.json",
     "proxy_url": "",
     "api_key":"xxxx",
     "claude_path": ""
