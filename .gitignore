@@ -21,3 +21,4 @@ logs/
 /dist_nu_test3/
 /.cache/
 /src/build/nuitka/nuitka.ini
+/src/build/nuitka/nuitka.local.md

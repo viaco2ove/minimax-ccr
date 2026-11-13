@@ -43,6 +43,8 @@ src/build/nuitka/
 | `conda_ver` | conda 发行版名（仅信息用） | `miniconda3` |
 | `USERPROFILE` | 当前用户主目录 | `C:\Users\viaco` |
 | `port` | 打包产物固定监听端口（可选，默认 2048） | `2048` |
+| `DIST_UPDATE` | 精简更新包输出目录 | `/dist_nu/ccrg_update` |
+| `DIST_run` | run 环境部署目录（`--run` 目标） | `D:\Users\xxx\PycharmProjects\minimax-ccr-run\ccrg` |
 
 说明：
 - 所有脚本通过 `nuitka_cfg.py` 读取此文件；路径支持绝对路径，也支持相对 `ROOT` 的相对路径。
@@ -114,6 +116,25 @@ run_ccrg.exe
 
 - 常驻监听 `2048` 端口（以 `nuitka.ini` 的 `port` 为准）。
 - 模型正常加载时为语义路由（`SentenceTransformer`）；若 `dist` 缺 stdlib 副本或 `ml_lib` 不完整，会降级为关键词路由，请按上文后处理补全。
+
+## --run 的支持
+[nuitka.local.md.example](nuitka.local.md.example)
+增加--run 的支持，支持部署到run 环境 {DIST_run}，但是不覆盖配置文件和日志文件和数据库
+
+打包 + 后处理完成后，自动把完整 dist 部署到 `nuitka.ini` 的 `DIST_run` 目录（run 环境）：
+
+- **覆盖更新**：程序本体（`run_ccrg.exe` / DLL / stdlib 副本 / `ml_lib/`）
+- **保留不覆盖**：`.gateway.json`、`keywords.json`、`logs/`、`*.log`、`*.db`
+- 仅当 run 环境**缺少**上述文件时，才从 dist 补齐（保证首次部署能正常启动）
+
+```cmd
+%conda_envs%\python.exe src\build\nuitka\build_nuitka.py --run
+```
+```powershell
+& $conda_envs/python.exe src\build\nuitka\build_nuitka.py --run
+```
+
+`--update` 与 `--run` 可同时使用：`--update` 生成精简更新包，`--run` 部署到 run 环境。
 
 ## 常见问题
 

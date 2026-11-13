@@ -30,6 +30,7 @@ from .splitter import Splitter, SplitterFactory
 from .splitter.base import RoutingDecision
 from .types import GatewayConfig, ProviderConfig, RequestTags
 from .usage_stats import get_usage_stats
+from .middleware.workflow_tag import StageSessionCache, WorkflowTagStripper
 
 # 配置日志
 import os
@@ -76,6 +77,8 @@ _workflow_splitter: Splitter | None = None
 _workflow_stage_splitter: Splitter | None = None
 _provider_semaphores: dict[str, asyncio.Semaphore] = {}
 _provider_last_request_time: dict[str, float] = {}
+# 会话级 workflow 阶段缓存：替代旧的"响应流注入可见 tag"方案（见 middleware/workflow_tag.py）
+_session_stage_cache = StageSessionCache()
 
 # ── 并发控制 & 连接池 ─────────────────────────────────────────────
 # 全局并发上限：同时处理的请求数（含流式）。4 客户端 × 多轮工具调用时，
@@ -1133,7 +1136,16 @@ def _strip_empty_and_unsupported_blocks(body: dict) -> dict:
                 if block_type == "thinking":
                     changed = True
                     continue
+                # 跳过 tool_addition block（Claude Code 客户端自定义类型，MiniMax 等 API 不支持，
+                # 否则报 "unsupported content type 'tool_addition'"）
+                if block_type == "tool_addition":
+                    changed = True
+                    continue
                 new_content.append(block)
+            if not new_content:
+                # content 被清空，丢弃整条消息（Anthropic 兼容接口不接受空 content）
+                changed = True
+                continue
             if changed:
                 msg = dict(msg, content=new_content)
         new_messages.append(msg)
@@ -2813,9 +2825,16 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
             if is_user_initiated:
                 stage = "intention_analyze"  # 用户输入 -> 意图分析（每次都走）
             else:
-                # AI 自身后续请求（工具回调等非用户发言）：用独立 workflow_splitter 判断阶段，
-                # 无法判定时回退 _infer_stage_from_context
-                stage = _detect_workflow_stage(body)
+                # AI 自身后续请求（工具回调等非用户发言）：
+                # 1) 优先用服务端会话缓存（上一轮阶段完成时写入，替代旧的响应流可见 tag）
+                # 2) 再用独立 workflow_splitter 判断阶段
+                # 3) 都无法判定时回退 _infer_stage_from_context
+                cached_stage = _session_stage_cache.get(body)
+                if cached_stage:
+                    logger.info(
+                        f"[{request_id}] Workflow stage from session cache: {cached_stage}"
+                    )
+                stage = cached_stage or _detect_workflow_stage(body)
 
             logger.info(f"[{request_id}] Workflow stage (auto-detected): {stage}")
         else:
@@ -2848,11 +2867,8 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
         # 4. intention_analyze 阶段嵌入 workflow prompt
         if step_name == "intention_analyze":
             workflow_prompt = """流程：intention_analyze → execute_solve → analyze_plan → execute_write
-- "{workflow_stage:intention_analyze}": 分析用户意图阶段
-- "{workflow_stage:execute_solve}": 执行解决方案阶段
-- "{workflow_stage:analyze_plan}": 分析执行结果阶段
-- "{workflow_stage:execute_write}": 写入结果阶段
-返回时：请用 {workflow_stage:execute_solve} 等标识你下一步想继续分析，还是执行解决方案，还是写入结果
+当前处于 intention_analyze（分析用户意图）阶段，完成分析后直接给出结论即可。
+阶段切换由系统自动完成，不要在回复中输出 {workflow_stage:xxx} 之类的标记。
 
 """
             processed_msgs = []
@@ -2891,12 +2907,21 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 raise
 
         try:
+            # 剥离上游模型可能残留输出的 {workflow_stage:xxx} 标记（兜底过滤器）
+            tag_stripper = WorkflowTagStripper()
             async for chunk in router.call_provider_streaming(wrapped_call, msgs):
                 all_failed = False
-                yield chunk
-            # 阶段完成后，注入 {workflow_stage:xxx} tag 告诉 CCRG 下一步该设什么 stage
-            # （仅对语义分块路由结果注入；keyword_routing / non_workflow_bypass 命中属一次性
-            #  completion（如会话标题生成），不应向响应污染 workflow_stage tag）
+                chunk = tag_stripper.feed(chunk)
+                if chunk:
+                    yield chunk
+            # 流结束：放出过滤器中暂存的疑似标记前缀残余
+            tail = tag_stripper.flush()
+            if tail:
+                yield tail
+            # 阶段完成后，将下一阶段写入服务端会话缓存，告诉 CCRG 下一轮工具回调
+            # 该走哪个 stage（不再向响应流注入可见 tag，避免显示在客户端界面上）。
+            # 仅对语义分块路由结果记录；keyword_routing / non_workflow_bypass 命中属
+            # 一次性 completion（如会话标题生成），不应覆盖阶段状态。
             if routing_decision.matched_rule not in ("keyword_routing", "non_workflow_bypass"):
                 _stage_hints = {
                     "intention_analyze": "execute_solve",
@@ -2905,9 +2930,8 @@ async def _handle_workflow(request: Request, body: dict, request_id: str) -> Res
                 }
                 next_stage = _stage_hints.get(step_name)
                 if next_stage:
-                    tag = f"\n\n{{workflow_stage:{next_stage}}}"
-                    tag_sse = f"data: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': tag}})}\n\n"
-                    yield tag_sse.encode()
+                    _session_stage_cache.set(body, next_stage)
+                    logger.info(f"[{request_id}] workflow stage -> {next_stage} (session cache)")
             # 正常返回，不走下面的 error 处理
             yield b"data: [DONE]\n\n"
             return

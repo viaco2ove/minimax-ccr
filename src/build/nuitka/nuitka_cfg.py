@@ -17,6 +17,7 @@ _DEFAULTS = {
     "conda_ver": "",
     "USERPROFILE": "",
     "port": "2048",                # 打包产物固定监听端口
+    "DIST_run": "",                # run 环境部署目录（保留其配置/日志/数据库）
 }
 
 
@@ -61,6 +62,8 @@ class NuitkaCfg:
         self.BUILD_TEMP = os.path.join(dist_base, "ccrg_build_temp")
         # 精简更新版输出目录（不含配置文件/数据库/日志），如 /dist_nu/ccrg_update
         self.DIST_UPDATE = _abs(self.ROOT, self.raw.get("DIST_UPDATE", "/dist_nu/ccrg_update"))
+        # run 环境部署目录，如 D:/Users/xxx/PycharmProjects/minimax-ccr-run/ccrg
+        self.DIST_RUN = _abs(self.ROOT, self.raw.get("DIST_run", ""))
 
         # Python / conda
         self.CONDA_ENVS = self.raw.get("conda_envs", "")

@@ -74,6 +74,26 @@ class MiniMaxAdapter(AnthropicAdapter):
                     if provider_effort:
                         output_config["effort"] = provider_effort
 
+        # 剔除 Claude Code 自定义的 tool_addition 块（MiniMax Anthropic 接口不支持该
+        # content type，会报 invalid params: unsupported content type 'tool_addition'）
+        messages = result.get("messages")
+        if isinstance(messages, list):
+            cleaned_messages = []
+            for msg in messages:
+                content = msg.get("content")
+                if isinstance(content, list):
+                    kept = [
+                        b for b in content
+                        if not (isinstance(b, dict) and b.get("type") == "tool_addition")
+                    ]
+                    if len(kept) != len(content):
+                        if kept:
+                            msg = dict(msg, content=kept)
+                        else:
+                            continue  # 整条消息内容被清空，丢弃该消息
+                cleaned_messages.append(msg)
+            result["messages"] = cleaned_messages
+
         # MiniMax 对 system 字符串有 8000 字符限制，超出会返回 400 invalid params
         if "system" in result and isinstance(result["system"], str):
             system_str = result["system"]

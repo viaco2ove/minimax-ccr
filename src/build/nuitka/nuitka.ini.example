@@ -6,3 +6,5 @@ ROOT=D:\Users\xxx\PycharmProjects\minimax-ccr
 DIST=/dist_nu/
 USERPROFILE=C:\Users\xxx
 port=2048
+DIST_UPDATE=/dist_nu/ccrg_update
+DIST_run=D:\Users\xxx\PycharmProjects\minimax-ccr-run\ccrg

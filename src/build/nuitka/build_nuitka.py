@@ -169,11 +169,58 @@ def make_update_copy():
     print(f"  [OK] update package -> {dst}  (configs / logs / *.db excluded)")
 
 
+def deploy_to_run():
+    """把完整 dist 部署到 run 环境（cfg.DIST_RUN）。
+
+    规则：
+    - 程序本体（exe / DLL / stdlib / ml_lib）覆盖更新；
+    - 配置文件（.gateway.json / keywords.json）、日志（logs/、*.log）和数据库（*.db）一律不覆盖，
+      仅在目标目录缺失时才补齐（保证 run 环境能正常启动）。
+    """
+    dst = cfg.DIST_RUN
+    print(f"\n== Deploying to run environment: {dst} ==")
+    if not dst:
+        raise RuntimeError("nuitka.ini 未配置 DIST_run，无法部署到 run 环境")
+    if not os.path.isdir(cfg.DIST):
+        raise RuntimeError(f"dist not found: {cfg.DIST}，请先完成打包")
+
+    # 目标目录里的 exe 正在运行会锁住 DLL，部署前先结束
+    stop_running_exe()
+
+    os.makedirs(dst, exist_ok=True)
+    # dirs_exist_ok=True：目标已有的运行时数据文件不会被删除
+    shutil.copytree(cfg.DIST, dst, ignore=_ignore_runtime_data, dirs_exist_ok=True)
+
+    # 配置/日志目录：缺失才补，存在则保持原样
+    for name in (".gateway.json", "keywords.json"):
+        src = os.path.join(cfg.DIST, name)
+        if os.path.isfile(src) and not os.path.isfile(os.path.join(dst, name)):
+            shutil.copy(src, os.path.join(dst, name))
+            print(f"  [NEW] {name} (目标缺失，已补齐)")
+        elif os.path.isfile(src):
+            print(f"  [KEEP] {name} (保留 run 环境现有配置)")
+    logs_dst = os.path.join(dst, "logs")
+    if not os.path.isdir(logs_dst):
+        os.makedirs(logs_dst, exist_ok=True)
+        print("  [NEW] logs/ (目标缺失，已创建)")
+
+    # 确认数据库与日志未被改动
+    kept = [f for f in os.listdir(dst) if f.endswith(".db") or f.endswith(".log")]
+    if kept:
+        print(f"  [KEEP] 数据库/日志保留: {kept}")
+    print(f"  [OK] deployed -> {dst}  (configs / logs / *.db not overwritten)")
+
+
 def main():
+    args = sys.argv[1:]
+    want_update = "--update" in args
+    want_run = "--run" in args
+
     print(f"ROOT    = {cfg.ROOT}")
     print(f"Python  = {cfg.require_env()}")
     print(f"Dist    = {cfg.DIST}")
-    print(f"Update  = {cfg.DIST_UPDATE}" if "--update" in sys.argv else "")
+    print(f"Update  = {cfg.DIST_UPDATE}" if want_update else "")
+    print(f"Run     = {cfg.DIST_RUN}" if want_run else "")
 
     ensure_nuitka()
     stop_running_exe()
@@ -190,8 +237,11 @@ def main():
     print("\n== Running post-build fix ==")
     subprocess.run([cfg.require_env(), fix], check=False)
 
-    if "--update" in sys.argv:
+    if want_update:
         make_update_copy()
+
+    if want_run:
+        deploy_to_run()
 
     print("\nAll done. Run:  cd dist_nu/ccrg && run_ccrg.exe")
 
